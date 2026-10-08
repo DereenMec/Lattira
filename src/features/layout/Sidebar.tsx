@@ -1,11 +1,17 @@
-import { CalendarDays, Clock, FolderOpen, Inbox, Library, Plus, Search } from "lucide-react";
+import { CalendarDays, Clock, FolderOpen, Inbox, Info, Languages, Library, Plus, Search } from "lucide-react";
 import { useState } from "react";
+import { openAbout } from "@/features/about/AboutDialog";
+import { openContextMenu } from "@/features/menu/ContextMenu";
+import { projectMenu } from "@/features/menu/menus";
+import { ProjectIcon } from "@/features/project/projectIcons";
+import { setLocale, useLocale, useT } from "@/i18n";
 import { inboxOf, useAppStore, type View } from "@/store/appStore";
 import type { ID } from "@/types/model";
 import { useCanvasDrag } from "./canvasDrag";
 
 export function Sidebar() {
-  const workspace = useAppStore((s) => s.workspace);
+  const t = useT();
+  const locale = useLocale((s) => s.locale);
   const projects = useAppStore((s) => s.projects);
   const canvases = useAppStore((s) => s.canvases);
   const view = useAppStore((s) => s.view);
@@ -36,47 +42,54 @@ export function Sidebar() {
     <nav className="sidebar">
       <div className="sidebar-head">
         <img src="/lattira.svg" alt="" width={22} height={22} />
-        <div>
-          <div className="brand">栖页</div>
-          <div className="ws-name" title={workspace?.path}>
-            {workspace?.name}
-          </div>
-        </div>
+        <div className="brand">{t("栖页")}</div>
+        <button className="icon-btn head-btn" onClick={openAbout} title={t("关于")}>
+          <Info size={15} />
+        </button>
+        <button
+          className="icon-btn head-btn lang-btn"
+          onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
+          title={locale === "zh" ? "Switch to English" : "切换到中文"}
+        >
+          <Languages size={15} />
+          <span>{locale === "zh" ? "EN" : "中"}</span>
+        </button>
       </div>
 
       <button className="nav-item search-trigger" onClick={() => useAppStore.getState().setSearchOpen(true)}>
         <Search size={16} />
-        <span>搜索</span>
+        <span>{t("搜索")}</span>
         <kbd>Ctrl E</kbd>
       </button>
 
       <button className={`nav-item${is("recent") ? " is-active" : ""}`} onClick={() => navigate({ kind: "recent" })}>
         <Clock size={16} />
-        <span>最近</span>
+        <span>{t("最近")}</span>
       </button>
       {inbox && (
         <button
           className={projectClass(inbox.id)}
           data-drop-project={inbox.id}
+          onContextMenu={(e) => openContextMenu(e, projectMenu(inbox))}
           onClick={() => navigate({ kind: "project", projectId: inbox.id })}
         >
           <Inbox size={16} />
-          <span>未分类</span>
+          <span>{t("未分类")}</span>
           <span className="count">{countOf(inbox.id)}</span>
         </button>
       )}
       <button className={`nav-item${is("calendar") ? " is-active" : ""}`} onClick={() => navigate({ kind: "calendar" })}>
         <CalendarDays size={16} />
-        <span>日历</span>
+        <span>{t("日历")}</span>
       </button>
       <button className={`nav-item${is("assets") ? " is-active" : ""}`} onClick={() => navigate({ kind: "assets" })}>
         <Library size={16} />
-        <span>资源库</span>
+        <span>{t("资源库")}</span>
       </button>
 
       <div className="nav-group">
-        <span>项目</span>
-        <button className="icon-btn" onClick={() => setCreating(true)} title="新建项目">
+        <span>{t("项目")}</span>
+        <button className="icon-btn" onClick={() => setCreating(true)} title={t("新建项目")}>
           <Plus size={14} />
         </button>
       </div>
@@ -84,7 +97,7 @@ export function Sidebar() {
         <input
           className="nav-input"
           autoFocus
-          placeholder="项目名称"
+          placeholder={t("项目名称")}
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => void submit()}
@@ -103,19 +116,20 @@ export function Sidebar() {
             key={p.id}
             className={projectClass(p.id)}
             data-drop-project={p.id}
+            onContextMenu={(e) => openContextMenu(e, projectMenu(p))}
             onClick={() => navigate({ kind: "project", projectId: p.id })}
           >
-            <span className="dot" style={{ background: p.color }} />
+            <ProjectIcon project={p} />
             <span className="label">{p.name}</span>
             <span className="count">{countOf(p.id)}</span>
           </button>
         ))}
-        {userProjects.length === 0 && !creating && <p className="nav-empty">还没有项目，点 + 新建一个</p>}
+        {userProjects.length === 0 && !creating && <p className="nav-empty">{t("还没有项目，点 + 新建一个")}</p>}
       </div>
 
       <button className="nav-item ws-switch" onClick={() => void useAppStore.getState().pickWorkspace()}>
         <FolderOpen size={16} />
-        <span>切换工作区</span>
+        <span>{t("切换工作区")}</span>
       </button>
     </nav>
   );

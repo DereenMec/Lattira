@@ -20,6 +20,8 @@ export interface Project {
   id: ID;
   name: string;
   color: string;
+  /** 图标名，见 features/project/projectIcons.ts；为空时显示圆点 */
+  icon?: string | null;
   /** 系统自带的「未分类」项目，不可删除、不可重命名 */
   isInbox: boolean;
   pinned: boolean;
@@ -118,6 +120,9 @@ export interface Asset {
   /** 引用该资源的画布数 */
   refCount: number;
 }
+
+/** 导入结果的一项，与 src-tauri/src/commands.rs 的 ImportNode 对应：文件，或带着内容的文件夹 */
+export type ImportNode = { kind: "file"; asset: Asset } | { kind: "folder"; name: string; children: ImportNode[] };
 
 /** 一次保存相对上次保存的变化量 */
 export interface ChangeSummary {

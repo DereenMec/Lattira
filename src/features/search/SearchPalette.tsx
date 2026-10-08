@@ -1,13 +1,15 @@
 import { FileText, Image as ImageIcon, Search, Shapes, Type } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { backend } from "@/services/backend";
-import { useAppStore } from "@/store/appStore";
+import { msg, useT } from "@/i18n";
+import { projectLabel, useAppStore } from "@/store/appStore";
 import type { SearchHit } from "@/types/model";
 
 const KIND_ICON = { canvas: Shapes, text: Type, file: FileText, image: ImageIcon } as const;
-const KIND_LABEL = { canvas: "画布", text: "文本", file: "文件", image: "图中文字" } as const;
+const KIND_LABEL = { canvas: msg("画布"), text: msg("文本"), file: msg("文件"), image: msg("图中文字") } as const;
 
 export function SearchPalette() {
+  const t = useT();
   const projects = useAppStore((s) => s.projects);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -23,7 +25,7 @@ export function SearchPalette() {
       return;
     }
     let alive = true;
-    const t = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       backend
         .search(q)
         .then((r) => {
@@ -31,11 +33,11 @@ export function SearchPalette() {
           setHits(r);
           setActive(0);
         })
-        .catch((e) => useAppStore.getState().showToast(`搜索失败：${String(e)}`));
+        .catch((e) => useAppStore.getState().showToast(t("搜索失败：{error}", { error: String(e) })));
     }, 120);
     return () => {
       alive = false;
-      window.clearTimeout(t);
+      window.clearTimeout(timer);
     };
   }, [query]);
 
@@ -58,7 +60,7 @@ export function SearchPalette() {
           <input
             ref={inputRef}
             value={query}
-            placeholder="搜索画布名、卡片文字、文件名、图片中的文字"
+            placeholder={t("搜索画布名、卡片文字、文件名、图片中的文字")}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") close();
@@ -75,7 +77,7 @@ export function SearchPalette() {
         </div>
         {query.trim() && (
           <ul className="palette-results">
-            {hits.length === 0 && <li className="palette-empty">没有找到「{query.trim()}」</li>}
+            {hits.length === 0 && <li className="palette-empty">{t("没有找到「{q}」", { q: query.trim() })}</li>}
             {hits.map((h, i) => {
               const Icon = KIND_ICON[h.kind];
               const project = projects.find((p) => p.id === h.projectId);
@@ -85,7 +87,7 @@ export function SearchPalette() {
                     <Icon size={15} />
                     <span className="hit-snippet">{h.snippet}</span>
                     <span className="hit-meta">
-                      {KIND_LABEL[h.kind]} · {project?.name} / {h.canvasTitle}
+                      {t(KIND_LABEL[h.kind])} · {project ? projectLabel(project) : ""} / {h.canvasTitle}
                     </span>
                   </button>
                 </li>

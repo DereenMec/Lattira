@@ -2,6 +2,7 @@
 //!
 //! 命令都声明为 async，让 Tauri 在线程池上执行，避免导入大文件时卡住界面。
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -12,6 +13,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::clipboard;
 use crate::error::{Error, Result};
 use crate::files;
 use crate::ocr;
@@ -27,6 +29,7 @@ pub struct Project {
     id: String,
     name: String,
     color: String,
+    icon: Option<String>,
     is_inbox: bool,
     pinned: bool,
     archived: bool,
@@ -39,6 +42,7 @@ pub struct Project {
 pub struct ProjectPatch {
     name: Option<String>,
     color: Option<String>,
+    icon: Option<String>,
     pinned: Option<bool>,
     archived: Option<bool>,
 }
@@ -128,7 +132,7 @@ pub struct SearchHit {
 // 查询辅助
 // ---------------------------------------------------------------------------
 
-const PROJECT_COLS: &str = "id, name, color, is_inbox, pinned, archived, created_at, updated_at";
+const PROJECT_COLS: &str = "id, name, color, is_inbox, pinned, archived, created_at, updated_at, icon";
 const CANVAS_COLS: &str = "id, project_id, title, element_count, created_at, updated_at, preview";
 const ASSET_SELECT: &str = "SELECT a.id, a.hash, a.path, a.name, a.mime, a.size, a.width, a.height, a.imported_at, a.ocr_text,
     (SELECT COUNT(*) FROM asset_refs r JOIN canvases c ON c.id = r.canvas_id
@@ -145,6 +149,7 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         archived: r.get(5)?,
         created_at: r.get(6)?,
         updated_at: r.get(7)?,
+        icon: r.get(8)?,
     })
 }
 
@@ -294,7 +299,7 @@ pub async fn update_project(state: State<'_, AppState>, id: String, patch: Proje
         let tx = ws.conn.transaction()?;
         tx.execute(
             "UPDATE projects SET name = COALESCE(?2, name), color = COALESCE(?3, color), pinned = COALESCE(?4, pinned),
-               archived = COALESCE(?5, archived), dir = ?6, updated_at = ?7 WHERE id = ?1",
+               archived = COALESCE(?5, archived), dir = ?6, updated_at = ?7, icon = COALESCE(?8, icon) WHERE id = ?1",
             params![
                 id,
                 patch.name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
@@ -302,7 +307,8 @@ pub async fn update_project(state: State<'_, AppState>, id: String, patch: Proje
                 patch.pinned,
                 patch.archived,
                 new_dir,
-                now_ms()
+                now_ms(),
+                patch.icon,
             ],
         )?;
         workspace::rewrite_canvas_paths(&tx, &id, &old_dir, &new_dir)?;
@@ -519,6 +525,72 @@ fn import_file(ws: &Workspace, src: &Path) -> Result<Asset> {
     register_asset(ws, &hash, &dest, &name)
 }
 
+/// 导入结果的一项：文件，或文件夹（带着里面的文件和子文件夹）
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ImportNode {
+    File { asset: Asset },
+    Folder { name: String, children: Vec<ImportNode> },
+}
+
+/// 一次导入最多的文件数，防止误拖整个磁盘
+const MAX_IMPORT_FILES: usize = 1000;
+
+fn skip_entry(name: &str) -> bool {
+    name.starts_with('.') || name.eq_ignore_ascii_case("thumbs.db") || name.eq_ignore_ascii_case("desktop.ini")
+}
+
+fn count_files(path: &Path, total: &mut usize) -> Result<()> {
+    if path.is_file() {
+        *total += 1;
+    } else if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if !skip_entry(&entry.file_name().to_string_lossy()) {
+                count_files(&entry.path(), total)?;
+            }
+            if *total > MAX_IMPORT_FILES {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 文件夹内：文件在前、子文件夹在后，各自按名称排序
+fn import_node(ws: &Workspace, path: &Path) -> Result<ImportNode> {
+    if path.is_file() {
+        return Ok(ImportNode::File { asset: import_file(ws, path)? });
+    }
+    let mut entries: Vec<_> = fs::read_dir(path)?
+        .filter_map(|e| e.ok())
+        .filter(|e| !skip_entry(&e.file_name().to_string_lossy()))
+        .map(|e| e.path())
+        .collect();
+    entries.sort_by_key(|p| (p.is_dir(), p.file_name().map(|n| n.to_string_lossy().to_lowercase())));
+    let children = entries.iter().map(|p| import_node(ws, p)).collect::<Result<Vec<_>>>()?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(ImportNode::Folder { name, children })
+}
+
+/// 导入文件和文件夹，保留文件夹结构
+#[tauri::command]
+pub async fn import_tree(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<ImportNode>> {
+    let mut total = 0;
+    for p in &paths {
+        count_files(Path::new(p), &mut total)?;
+    }
+    if total > MAX_IMPORT_FILES {
+        return Err(Error::Invalid(format!("一次最多导入 {MAX_IMPORT_FILES} 个文件，请分批导入")));
+    }
+    let (nodes, root) = state.with(|ws| {
+        let nodes = paths.iter().map(|p| import_node(ws, Path::new(p))).collect::<Result<Vec<_>>>()?;
+        Ok((nodes, ws.root.clone()))
+    })?;
+    ocr::schedule(app, root);
+    Ok(nodes)
+}
+
 #[tauri::command]
 pub async fn import_paths(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<Asset>> {
     let (assets, root) = state.with(|ws| {
@@ -563,6 +635,267 @@ pub async fn open_asset(app: AppHandle, state: State<'_, AppState>, id: String) 
     app.opener()
         .open_path(path.to_string_lossy(), None::<&str>)
         .map_err(|e| Error::Invalid(format!("无法打开文件：{e}")))
+}
+
+// ---------------------------------------------------------------------------
+// 资源管理器与对外拖放
+// ---------------------------------------------------------------------------
+
+fn reveal(app: &AppHandle, path: &Path) -> Result<()> {
+    app.opener().reveal_item_in_dir(path).map_err(|e| Error::Invalid(format!("无法在资源管理器中显示：{e}")))
+}
+
+/// 在资源管理器中显示并选中文件
+#[tauri::command]
+pub async fn reveal_asset(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
+    let path = state.with(|ws| {
+        let asset = get_asset(&ws.conn, "id", &id)?.ok_or_else(|| Error::NotFound("资源", id.clone()))?;
+        Ok(ws.abs(&asset.path))
+    })?;
+    reveal(&app, &path)
+}
+
+#[tauri::command]
+pub async fn reveal_canvas(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
+    let path = state.with(|ws| Ok(ws.abs(&canvas_file(&ws.conn, &id)?)))?;
+    reveal(&app, &path)
+}
+
+/// 打开工作区根文件夹
+#[tauri::command]
+pub async fn reveal_workspace(app: AppHandle, state: State<'_, AppState>) -> Result<()> {
+    let path = state.with(|ws| Ok(ws.root.clone()))?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e| Error::Invalid(format!("无法打开文件夹：{e}")))
+}
+
+/// 打开项目对应的文件夹
+#[tauri::command]
+pub async fn reveal_project(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
+    let path = state.with(|ws| Ok(ws.root.join("projects").join(project_dir(&ws.conn, &id)?)))?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e| Error::Invalid(format!("无法打开文件夹：{e}")))
+}
+
+/// 把资源另存一份到用户选择的位置
+#[tauri::command]
+pub async fn copy_asset_to(state: State<'_, AppState>, id: String, dest: String) -> Result<()> {
+    state.with(|ws| {
+        let asset = get_asset(&ws.conn, "id", &id)?.ok_or_else(|| Error::NotFound("资源", id.clone()))?;
+        fs::copy(ws.abs(&asset.path), &dest)?;
+        Ok(())
+    })
+}
+
+/// 重命名资源：磁盘上的文件跟着改名；没写扩展名时沿用原扩展名
+#[tauri::command]
+pub async fn rename_asset(state: State<'_, AppState>, id: String, name: String) -> Result<Asset> {
+    state.with(|ws| rename_asset_in(ws, &id, &name))
+}
+
+fn rename_asset_in(ws: &Workspace, id: &str, name: &str) -> Result<Asset> {
+    let asset = get_asset(&ws.conn, "id", id)?.ok_or_else(|| Error::NotFound("资源", id.into()))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("文件名不能为空".into()));
+    }
+    let wanted = Path::new(name);
+    let old_ext = Path::new(&asset.name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let (stem, ext) = match wanted.extension() {
+        Some(ext) => (
+            wanted.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            ext.to_string_lossy().into_owned(),
+        ),
+        None => (name.to_string(), old_ext),
+    };
+
+    let old_abs = ws.abs(&asset.path);
+    let dir = old_abs.parent().map(Path::to_path_buf).unwrap_or_else(|| ws.root.join("assets"));
+    let target = files::unique_path(&dir, &files::sanitize(&stem), &files::sanitize(&ext), Some(&old_abs));
+    if target != old_abs {
+        fs::rename(&old_abs, &target)?;
+    }
+    let file_name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let rel = ws.rel(&target);
+    let mime = mime_guess::from_path(&file_name).first_or_octet_stream().essence_str().to_string();
+    ws.conn.execute(
+        "UPDATE assets SET name = ?2, path = ?3, mime = ?4 WHERE id = ?1",
+        params![id, file_name, rel, mime],
+    )?;
+
+    // 画布文件里的 file 字段供 Obsidian 等工具使用，一并更新
+    let mut stmt = ws.conn.prepare("SELECT canvas_id FROM asset_refs WHERE asset_id = ?1")?;
+    let canvases = stmt.query_map([id], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for canvas_id in canvases {
+        let Ok(file) = canvas_file(&ws.conn, &canvas_id) else { continue };
+        if let Err(e) = set_node_file(&ws.abs(&file), id, &rel) {
+            eprintln!("[rename_asset] 跳过画布 {canvas_id}：{e}");
+        }
+    }
+    get_asset(&ws.conn, "id", id)?.ok_or_else(|| Error::NotFound("资源", id.into()))
+}
+
+/// 把画布文件中引用某资源的节点的 file 字段改成新路径
+fn set_node_file(path: &Path, asset_id: &str, rel: &str) -> Result<()> {
+    let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+    let mut changed = false;
+    if let Some(nodes) = doc.get_mut("nodes").and_then(|n| n.as_array_mut()) {
+        for node in nodes {
+            if node.pointer("/lattira/assetId").and_then(|v| v.as_str()) == Some(asset_id) {
+                node["file"] = serde_json::Value::String(rel.to_string());
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        files::write_atomic(path, serde_json::to_string_pretty(&doc)?.as_bytes())?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAssetsResult {
+    /// 被移除了卡片的画布
+    canvas_ids: Vec<String>,
+    /// 一共从画布上移除的卡片数
+    removed_cards: usize,
+}
+
+/// 从一个画布文件中移除引用了这些资源的卡片及相连的连线；返回移除的卡片数与剩余元素数
+fn strip_asset_cards(path: &Path, assets: &HashSet<String>) -> Result<(usize, usize)> {
+    let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+    let mut removed = HashSet::new();
+    if let Some(nodes) = doc.get_mut("nodes").and_then(|n| n.as_array_mut()) {
+        nodes.retain(|node| {
+            let asset = node.pointer("/lattira/assetId").and_then(|v| v.as_str());
+            let hit = asset.is_some_and(|a| assets.contains(a));
+            if hit {
+                if let Some(id) = node.get("id").and_then(|v| v.as_str()) {
+                    removed.insert(id.to_string());
+                }
+            }
+            !hit
+        });
+    }
+    if let Some(edges) = doc.get_mut("edges").and_then(|e| e.as_array_mut()) {
+        edges.retain(|edge| {
+            let ends = ["fromNode", "toNode"].map(|k| edge.get(k).and_then(|v| v.as_str()).unwrap_or_default());
+            !ends.iter().any(|id| removed.contains(*id))
+        });
+    }
+    let remaining = doc.get("nodes").and_then(|n| n.as_array()).map_or(0, |n| n.len());
+    if !removed.is_empty() {
+        files::write_atomic(path, serde_json::to_string_pretty(&doc)?.as_bytes())?;
+    }
+    Ok((removed.len(), remaining))
+}
+
+/// 删除资源：文件移到 .lattira/trash/assets/，并从所有画布上移除引用它们的卡片
+#[tauri::command]
+pub async fn delete_assets(state: State<'_, AppState>, ids: Vec<String>) -> Result<DeleteAssetsResult> {
+    state.with(|ws| {
+        let set: HashSet<String> = ids.into_iter().collect();
+        let mut canvases = HashSet::new();
+        {
+            let mut stmt = ws.conn.prepare("SELECT canvas_id FROM asset_refs WHERE asset_id = ?1")?;
+            for id in &set {
+                for row in stmt.query_map([id], |r| r.get::<_, String>(0))? {
+                    canvases.insert(row?);
+                }
+            }
+        }
+
+        let mut removed_cards = 0;
+        let mut touched = Vec::new();
+        for canvas_id in &canvases {
+            let Ok(file) = canvas_file(&ws.conn, canvas_id) else { continue };
+            match strip_asset_cards(&ws.abs(&file), &set) {
+                Ok((0, _)) => {}
+                Ok((n, remaining)) => {
+                    removed_cards += n;
+                    ws.conn.execute(
+                        "UPDATE canvases SET element_count = ?2 WHERE id = ?1",
+                        params![canvas_id, remaining as i64],
+                    )?;
+                    touched.push(canvas_id.clone());
+                }
+                // 画布文件损坏或缺失时跳过，不影响删除文件本身
+                Err(e) => eprintln!("[delete_assets] 跳过画布 {canvas_id}：{e}"),
+            }
+        }
+
+        let trash = ws.root.join(".lattira").join("trash").join("assets");
+        fs::create_dir_all(&trash)?;
+        let tx = ws.conn.transaction()?;
+        for id in &set {
+            let path: Option<String> =
+                tx.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+            let Some(rel) = path else { continue };
+            let src = files::resolve(&ws.root, &rel);
+            if src.exists() {
+                let name = Path::new(&rel);
+                let stem = name.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let ext = name.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                fs::rename(&src, files::unique_path(&trash, &stem, &ext, None))?;
+            }
+            tx.execute("DELETE FROM asset_refs WHERE asset_id = ?1", [id])?;
+            tx.execute("DELETE FROM assets WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(DeleteAssetsResult { canvas_ids: touched, removed_cards })
+    })
+}
+
+#[derive(Deserialize)]
+pub struct TextItem {
+    name: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyCards {
+    /// 文件 / 图片卡片引用的资源
+    asset_ids: Vec<String>,
+    /// 文本卡片；和文件一起复制时写成临时 .txt，随文件一起粘贴
+    texts: Vec<TextItem>,
+    /// 文本卡片拼接后的纯文本
+    plain_text: String,
+    /// 栖页卡片数据（JSON），粘贴回画布用
+    cards: String,
+}
+
+/// 复制选中的卡片到系统剪贴板（Ctrl+C）
+#[tauri::command]
+pub async fn copy_cards(state: State<'_, AppState>, payload: CopyCards) -> Result<()> {
+    let files = state.with(|ws| {
+        let mut files = Vec::new();
+        for id in &payload.asset_ids {
+            if let Some(asset) = get_asset(&ws.conn, "id", id)? {
+                files.push(ws.abs(&asset.path).to_string_lossy().into_owned());
+            }
+        }
+        if !files.is_empty() && !payload.texts.is_empty() {
+            let dir = ws.root.join(".lattira").join("tmp");
+            fs::create_dir_all(&dir)?;
+            for t in &payload.texts {
+                let path = files::unique_path(&dir, &files::sanitize(&t.name), "txt", None);
+                files::write_atomic(&path, t.text.as_bytes())?;
+                files.push(path.to_string_lossy().into_owned());
+            }
+        }
+        Ok(files)
+    })?;
+    let text = Some(payload.plain_text.as_str()).filter(|t| !t.trim().is_empty());
+    clipboard::write(&files, text, Some(&payload.cards))
+}
+
+#[tauri::command]
+pub async fn read_clipboard() -> Result<clipboard::ClipboardContent> {
+    clipboard::read()
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +1065,77 @@ mod tests {
 
         let (_, is_new) = Workspace::open(&dir).unwrap();
         assert!(!is_new);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn strip_asset_cards_removes_cards_and_edges() {
+        let path = std::env::temp_dir().join(format!("lattira-strip-{}.canvas", new_id()));
+        fs::write(
+            &path,
+            r#"{"nodes":[
+                {"id":"t","type":"text","text":"留下"},
+                {"id":"f","type":"file","file":"assets/a.pdf","lattira":{"type":"file","assetId":"A"}},
+                {"id":"g","type":"file","file":"assets/b.png","lattira":{"type":"image","assetId":"B"}}
+              ],"edges":[{"id":"e1","fromNode":"t","toNode":"f"},{"id":"e2","fromNode":"t","toNode":"g"}]}"#,
+        )
+        .unwrap();
+        let (removed, remaining) = strip_asset_cards(&path, &HashSet::from(["A".to_string()])).unwrap();
+        assert_eq!((removed, remaining), (1, 2));
+        let doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let edges: Vec<&str> = doc["edges"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(edges, vec!["e2"]);
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn import_folder_keeps_structure() {
+        let dir = std::env::temp_dir().join(format!("lattira-tree-{}", new_id()));
+        let src = dir.join("资料");
+        fs::create_dir_all(src.join("图纸")).unwrap();
+        fs::write(src.join("b.txt"), "b").unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        fs::write(src.join(".hidden"), "x").unwrap();
+        fs::write(src.join("Thumbs.db"), "x").unwrap();
+        fs::write(src.join("图纸").join("plan.drawio"), "<mxfile/>").unwrap();
+        let ws_dir = dir.join("ws");
+        fs::create_dir_all(&ws_dir).unwrap();
+        let (ws, _) = Workspace::open(&ws_dir).unwrap();
+
+        let ImportNode::Folder { name, children } = import_node(&ws, &src).unwrap() else { panic!("应为文件夹") };
+        assert_eq!(name, "资料");
+        let names: Vec<String> = children
+            .iter()
+            .map(|c| match c {
+                ImportNode::File { asset } => asset.name.clone(),
+                ImportNode::Folder { name, .. } => format!("[{name}]"),
+            })
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt", "[图纸]"]);
+        drop(ws);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_asset_keeps_extension_and_moves_file() {
+        let dir = std::env::temp_dir().join(format!("lattira-rename-{}", new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (ws, _) = Workspace::open(&dir).unwrap();
+        let src = dir.join("流程.drawio");
+        fs::write(&src, "<mxfile/>").unwrap();
+        let a = import_file(&ws, &src).unwrap();
+
+        // 不写扩展名：沿用 .drawio
+        let b = rename_asset_in(&ws, &a.id, "部署架构").unwrap();
+        assert_eq!(b.name, "部署架构.drawio");
+        assert!(ws.abs(&b.path).is_file());
+        assert!(!ws.abs(&a.path).exists());
+
+        // 写了扩展名：按新的来
+        let c = rename_asset_in(&ws, &a.id, "部署架构.xml").unwrap();
+        assert_eq!(c.name, "部署架构.xml");
+        assert!(rename_asset_in(&ws, &a.id, "  ").is_err());
+        drop(ws);
         fs::remove_dir_all(&dir).ok();
     }
 

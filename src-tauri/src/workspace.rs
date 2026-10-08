@@ -64,6 +64,8 @@ impl Workspace {
         fs::create_dir_all(&meta_dir)?;
         fs::create_dir_all(root.join("projects"))?;
         fs::create_dir_all(root.join("assets"))?;
+        // 拖出文本卡片时生成的临时文件，上次会话留下的直接清掉
+        let _ = fs::remove_dir_all(meta_dir.join("tmp"));
 
         let ws = Workspace { root: root.to_path_buf(), conn: db::open(&db_path)? };
         ws.ensure_inbox()?;

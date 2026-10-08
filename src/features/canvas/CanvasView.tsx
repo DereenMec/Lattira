@@ -1,6 +1,21 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Group, Map as MapIcon, Maximize, Minus, Paperclip, Plus, Redo2, StickyNote, Undo2 } from "lucide-react";
+import {
+  ArrowLeftRight,
+  BoxSelect,
+  ClipboardPaste,
+  Group,
+  Map as MapIcon,
+  Maximize,
+  Minus,
+  Paperclip,
+  FolderPlus,
+  Plus,
+  Redo2,
+  StickyNote,
+  Trash2,
+  Undo2,
+} from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -23,14 +38,19 @@ import {
   type Point,
   type Rect,
 } from "@/lib/geometry";
+import { openContextMenu } from "@/features/menu/ContextMenu";
+import { elementMenu } from "@/features/menu/menus";
+import { t, useT } from "@/i18n";
 import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasElement, ID, Viewport } from "@/types/model";
 import { EdgeLayer } from "./EdgeLayer";
 import { ElementView, type ElementHandlers } from "./ElementView";
+import { copySelection, pasteIntoCanvas } from "./clipboard";
+import { FindBar, findMatches } from "./FindBar";
 import { Minimap } from "./Minimap";
-import { elementsForAssets, newTextCard } from "./placement";
+import { assetsInTree, elementsForAssets, elementsForTree, newTextCard } from "./placement";
 
 type Gesture =
   | { kind: "pan"; start: Point; vp: Viewport }
@@ -93,6 +113,7 @@ interface Props {
 }
 
 export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
+  useT();
   const doc = useCanvasStore((s) => s.doc);
   const selectedIds = useCanvasStore((s) => s.selectedIds);
   const selectedEdgeId = useCanvasStore((s) => s.selectedEdgeId);
@@ -105,12 +126,17 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
   const [cull, setCull] = useState<CullWindow | null>(null);
   const gesture = useRef<Gesture | null>(null);
   const spaceHeld = useRef(false);
+  // 最近一次指针位置；粘贴时如果鼠标在画布上，就贴在鼠标处
+  const lastPointer = useRef<{ clientX: number; clientY: number } | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [marquee, setMarquee] = useState<Rect | null>(null);
   const [pendingEdge, setPendingEdge] = useState<{ fromId: ID; to: Point } | null>(null);
   const [panning, setPanning] = useState(false);
   const [highlightId, setHighlightId] = useState<ID | null>(null);
   const [dropActive, setDropActive] = useState(false);
+  // nav 每次跳转加一：即使跳到同一个结果也会重新定位
+  const [find, setFind] = useState({ open: false, query: "", index: 0, nav: 0 });
+  const highlightTimer = useRef<number | undefined>(undefined);
 
   const loaded = doc?.canvasId === canvasId;
 
@@ -118,7 +144,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
   useEffect(() => {
     canvas()
       .load(canvasId)
-      .catch((e) => app().showToast(`打开画布失败：${String(e)}`));
+      .catch((e) => app().showToast(t("打开画布失败：{error}", { error: String(e) })));
     return () => void canvas().flush();
   }, [canvasId]);
 
@@ -129,6 +155,12 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     ro.observe(node);
     return () => ro.disconnect();
   }, []);
+
+  // 挂载后立即量一次尺寸，不等 ResizeObserver 的首次回调（页面在后台时它不会触发）
+  useLayoutEffect(() => {
+    const r = containerRef.current?.getBoundingClientRect();
+    if (r && r.width > 0) setSize((s) => (s.w === r.width && s.h === r.height ? s : { w: r.width, h: r.height }));
+  }, [loaded]);
 
   // 视口变化：直接写 DOM，必要时才更新渲染窗口（触发 React 渲染）
   useLayoutEffect(() => {
@@ -159,8 +191,8 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     canvas().setViewport(fitRect(el, size.w, size.h, 160, 1));
     canvas().select([el.id]);
     setHighlightId(el.id);
-    const t = window.setTimeout(() => setHighlightId(null), 1600);
-    return () => window.clearTimeout(t);
+    const timer = window.setTimeout(() => setHighlightId(null), 1600);
+    return () => window.clearTimeout(timer);
   }, [loaded, focusElementId, focusAssetId, size.w, size.h]);
 
   // ---- 坐标换算 ----
@@ -173,6 +205,12 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     [toLocal],
   );
   const viewCenterWorld = useCallback(() => screenToWorld({ x: size.w / 2, y: size.h / 2 }, canvas().viewport), [size]);
+  const pasteAnchor = useCallback(() => {
+    const p = lastPointer.current;
+    const r = containerRef.current?.getBoundingClientRect();
+    const inside = p && r && p.clientX >= r.left && p.clientX <= r.right && p.clientY >= r.top && p.clientY <= r.bottom;
+    return inside ? toWorld(p) : viewCenterWorld();
+  }, [toWorld, viewCenterWorld]);
 
   // ---- 导入文件 ----
   const placeAssets = useCallback(async (load: () => Promise<Asset[]>, at: Point) => {
@@ -182,17 +220,37 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       app().addAssets(imported);
       canvas().addElements(elementsForAssets(imported, at));
     } catch (e) {
-      app().showToast(`导入失败：${String(e)}`);
+      app().showToast(t("导入失败：{error}", { error: String(e) }));
     }
   }, []);
 
-  const pickFiles = useCallback(async () => {
+  /** 按路径导入文件和文件夹：文件夹变成分组框，里面的文件按网格排好 */
+  const placeTree = useCallback(async (paths: string[], at: Point) => {
+    try {
+      const nodes = await backend.importTree(paths);
+      const assets = assetsInTree(nodes);
+      if (assets.length === 0 && nodes.length === 0) return;
+      app().addAssets(assets);
+      canvas().addElements(elementsForTree(nodes, at));
+    } catch (e) {
+      app().showToast(t("导入失败：{error}", { error: String(e) }));
+    }
+  }, []);
+
+  /** 选择文件（或文件夹）放到画布上；不指定位置时放在视口中央 */
+  const pickFiles = useCallback(async (where?: Point, folders = false) => {
     if (!canvas().doc) return;
-    const at = viewCenterWorld();
+    const at = where ?? viewCenterWorld();
     if (backend.kind === "tauri") {
-      const picked = await open({ multiple: true, title: "选择要放到画布上的文件" });
+      const picked = await open({
+        multiple: true,
+        directory: folders,
+        title: folders ? t("选择要放到画布上的文件夹") : t("选择要放到画布上的文件"),
+      });
       const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
-      if (paths.length) await placeAssets(() => backend.importPaths(paths), at);
+      if (paths.length) await placeTree(paths, at);
+    } else if (folders) {
+      app().showToast(t("浏览器预览模式不支持按路径导入"));
     } else {
       const input = document.createElement("input");
       input.type = "file";
@@ -203,7 +261,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       };
       input.click();
     }
-  }, [placeAssets, viewCenterWorld]);
+  }, [placeAssets, placeTree, viewCenterWorld]);
 
   // 桌面端：系统文件拖放由 Tauri 接管，拿到的是绝对路径
   useEffect(() => {
@@ -220,7 +278,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
           if (!canvas().doc || p.paths.length === 0) return;
           const ratio = window.devicePixelRatio || 1;
           const at = toWorld({ clientX: p.position.x / ratio, clientY: p.position.y / ratio });
-          void placeAssets(() => backend.importPaths(p.paths), at);
+          void placeTree(p.paths, at);
         }
       })
       .then((fn) => {
@@ -231,7 +289,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       disposed = true;
       unlisten?.();
     };
-  }, [placeAssets, toWorld]);
+  }, [placeTree, toWorld]);
 
   // ---- 视口操作 ----
   const fitAll = useCallback(() => {
@@ -270,6 +328,16 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
   // ---- 键盘与剪贴板 ----
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+F 换成画布内查找：浏览器自带的网页查找看不到视口外的卡片和图片中的文字
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        if (app().searchOpen || !canvas().doc) return;
+        e.preventDefault();
+        setFind((f) => ({ ...f, open: true }));
+        const input = document.querySelector<HTMLInputElement>("[data-find-input]");
+        input?.focus();
+        input?.select();
+        return;
+      }
       if (app().searchOpen || isTyping(e.target) || !canvas().doc) return;
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
@@ -307,10 +375,21 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         s.select([]);
       } else if (key === "enter" && s.selectedIds.length === 1) {
         const el = s.doc!.elements.find((x) => x.id === s.selectedIds[0]);
-        if (el && (el.type === "text" || el.type === "section")) {
+        if (el?.type === "text") {
+          e.preventDefault();
+          s.openEditor(el.id);
+        } else if (el?.type === "section") {
           e.preventDefault();
           s.setEditing(el.id);
         }
+      } else if (mod && key === "c" && s.selectedIds.length > 0) {
+        // 页面里有选中的文字（如检查器中的识别结果）时，保留浏览器的复制文字
+        if (window.getSelection()?.toString()) return;
+        e.preventDefault();
+        void copySelection();
+      } else if (mod && key === "d") {
+        e.preventDefault();
+        s.duplicate(s.selectedIds);
       } else if (key === "t" && !mod) {
         s.addElements([newTextCard(viewCenterWorld())], { edit: true });
         e.preventDefault();
@@ -320,19 +399,14 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       if (e.code === "Space") spaceHeld.current = false;
     };
     const onPaste = (e: ClipboardEvent) => {
-      if (app().searchOpen || isTyping(e.target) || !canvas().doc || !e.clipboardData) return;
-      const files = Array.from(e.clipboardData.files);
-      const at = viewCenterWorld();
-      if (files.length > 0) {
-        e.preventDefault();
-        void placeAssets(() => backend.importBlobs(files), at);
-        return;
-      }
-      const text = e.clipboardData.getData("text/plain");
-      if (text.trim()) {
-        e.preventDefault();
-        canvas().addElements([newTextCard(at, text)]);
-      }
+      if (app().searchOpen || isTyping(e.target) || !canvas().doc) return;
+      e.preventDefault();
+      // 浏览器提供的剪贴板数据只能在事件内同步读取，先取出来作为后备
+      const fallback = {
+        files: Array.from(e.clipboardData?.files ?? []),
+        text: e.clipboardData?.getData("text/plain") ?? "",
+      };
+      void pasteIntoCanvas(pasteAnchor(), fallback);
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -342,7 +416,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("paste", onPaste);
     };
-  }, [fitAll, zoomBy, placeAssets, viewCenterWorld]);
+  }, [fitAll, zoomBy, viewCenterWorld, pasteAnchor]);
 
   // ---- 指针手势 ----
   const capture = (e: ReactPointerEvent) => {
@@ -414,12 +488,18 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     onDoubleClick(id) {
       const el = canvas().doc?.elements.find((x) => x.id === id);
       if (!el) return;
-      if (el.type === "text" || el.type === "section") canvas().setEditing(id);
+      if (el.type === "text") canvas().openEditor(id);
+      else if (el.type === "section") canvas().setEditing(id);
       else {
         const asset = app().assets.get(el.assetId);
-        if (!asset) app().showToast("找不到这个文件");
-        else void backend.openAsset(asset).catch((err) => app().showToast(`无法打开文件：${String(err)}`));
+        if (!asset) app().showToast(t("找不到这个文件"));
+        else void backend.openAsset(asset).catch((err) => app().showToast(t("无法打开文件：{error}", { error: String(err) })));
       }
+    },
+    onContextMenu(e, id) {
+      // 右键未选中的卡片时，先单独选中它
+      if (!canvas().selectedIds.includes(id)) canvas().select([id]);
+      openContextMenu(e, elementMenu(canvas().selectedIds));
     },
     onFinishEdit(id, value) {
       const s = canvas();
@@ -445,11 +525,13 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       onConnectStart: (e, id) => handlersRef.current.onConnectStart(e, id),
       onDoubleClick: (id) => handlersRef.current.onDoubleClick(id),
       onFinishEdit: (id, v) => handlersRef.current.onFinishEdit(id, v),
+      onContextMenu: (e, id) => handlersRef.current.onContextMenu(e, id),
     }),
     [],
   );
 
   const onPointerMove = (e: ReactPointerEvent) => {
+    lastPointer.current = { clientX: e.clientX, clientY: e.clientY };
     const g = gesture.current;
     const s = canvas();
     if (!g || !s.doc) return;
@@ -517,6 +599,67 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     canvas().addElements([newTextCard(toWorld(e))], { edit: true });
   };
 
+  // ---- 右键菜单：画布空白处与连线 ----
+  const onBackgroundMenu = (e: ReactMouseEvent) => {
+    if (!canvas().doc || (e.target as HTMLElement).closest("[data-element-id], .canvas-toolbar, .minimap, .find-bar")) return;
+    const at = toWorld(e);
+    canvas().select([]);
+    openContextMenu(e, [
+      {
+        label: t("在此新建文本卡片"),
+        icon: <StickyNote size={15} />,
+        hint: t("双击"),
+        onSelect: () => canvas().addElements([newTextCard(at)], { edit: true }),
+      },
+      { label: t("在此插入文件…"), icon: <Paperclip size={15} />, onSelect: () => void pickFiles(at) },
+      { label: t("在此插入文件夹…"), icon: <FolderPlus size={15} />, onSelect: () => void pickFiles(at, true) },
+      {
+        label: t("粘贴"),
+        icon: <ClipboardPaste size={15} />,
+        hint: "Ctrl+V",
+        onSelect: () => void pasteIntoCanvas(at, { files: [], text: "" }),
+      },
+      "separator",
+      {
+        label: t("全选"),
+        icon: <BoxSelect size={15} />,
+        hint: "Ctrl+A",
+        onSelect: () => canvas().select(canvas().doc!.elements.map((el) => el.id)),
+      },
+      { label: t("显示全部内容"), icon: <Maximize size={15} />, hint: "Shift+1", onSelect: fitAll },
+      {
+        label: app().minimapOpen ? t("隐藏小地图") : t("显示小地图"),
+        icon: <MapIcon size={15} />,
+        onSelect: () => app().toggleMinimap(),
+      },
+    ]);
+  };
+
+  const onEdgeMenu = useCallback((e: ReactMouseEvent, id: ID) => {
+    canvas().selectEdge(id);
+    openContextMenu(e, [
+      { label: t("反转方向"), icon: <ArrowLeftRight size={15} />, onSelect: () => canvas().reverseEdge(id) },
+      "separator",
+      {
+        label: t("删除连线"),
+        icon: <Trash2 size={15} />,
+        hint: "Delete",
+        danger: true,
+        onSelect: () => {
+          canvas().selectEdge(id);
+          canvas().deleteSelection();
+        },
+      },
+    ]);
+  }, []);
+  const onEdgeSelect = useCallback((id: ID) => canvas().selectEdge(id), []);
+
+  // 其他组件（如检查器的文件列表）请求定位某个元素
+  const focusRequest = useCanvasStore((s) => s.focusRequest);
+  useEffect(() => {
+    if (focusRequest) revealElement(focusRequest.id);
+  }, [focusRequest]);
+
   // 浏览器预览模式下的 HTML5 拖放
   const browserDrop =
     backend.kind === "browser"
@@ -536,7 +679,41 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       : {};
 
   // ---- 渲染：只画视口附近的元素 ----
+  // ---- 画布内查找 ----
+  const elements = doc?.elements;
+  const matches = useMemo(
+    () => (elements && find.open ? findMatches(elements, assets, find.query) : []),
+    [elements, assets, find.open, find.query],
+  );
+
+  /** 把元素移到视口中央（缩得太小时放大到 100%），选中并闪一下 */
+  const revealElement = useCallback(
+    (id: ID) => {
+      const el = canvas().doc?.elements.find((e) => e.id === id);
+      if (!el || size.w === 0) return;
+      const vp = canvas().viewport;
+      const zoom = vp.zoom < 0.5 ? 1 : vp.zoom;
+      canvas().setViewport({
+        zoom,
+        x: size.w / 2 - (el.x + el.width / 2) * zoom,
+        y: size.h / 2 - (el.y + el.height / 2) * zoom,
+      });
+      canvas().select([id]);
+      setHighlightId(id);
+      window.clearTimeout(highlightTimer.current);
+      highlightTimer.current = window.setTimeout(() => setHighlightId(null), 1600);
+    },
+    [size],
+  );
+
+  // 输入查询或按上一个 / 下一个时定位；编辑画布导致结果变化时不跳，以免打断用户
+  const currentMatch = matches.length ? matches[Math.min(find.index, matches.length - 1)] : undefined;
+  useEffect(() => {
+    if (find.open && currentMatch) revealElement(currentMatch);
+  }, [find.nav]);
+
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const matchSet = useMemo(() => new Set(matches), [matches]);
   const visible = useMemo(() => {
     if (!doc || !cull) return [];
     return doc.elements.filter((el) => intersects(cull.rect, el) || selectedSet.has(el.id) || el.id === editingId);
@@ -556,6 +733,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         showHandles={single === el.id && !lod}
         editing={editingId === el.id}
         highlighted={highlightId === el.id}
+        matched={matchSet.has(el.id)}
         lod={lod}
         asset={asset}
         assetUrl={asset && el.type === "image" ? backend.assetUrl(asset) : undefined}
@@ -573,6 +751,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onDoubleClick={onDoubleClick}
+      onContextMenu={onBackgroundMenu}
       {...browserDrop}
     >
       {/* transform 由上面的视口订阅直接写入，不经过 React */}
@@ -583,7 +762,8 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
           elements={doc.elements}
           selectedEdgeId={selectedEdgeId}
           pending={pendingEdge}
-          onSelect={(id) => canvas().selectEdge(id)}
+          onSelect={onEdgeSelect}
+          onContextMenu={onEdgeMenu}
         />
         {visible.filter((e) => e.type !== "section").map(renderEl)}
         {marquee && (
@@ -596,17 +776,33 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
 
       {doc.elements.length === 0 && (
         <div className="canvas-empty">
-          <p>双击空白处新建卡片</p>
-          <p>或把文件、图片拖进来</p>
+          <p>{t("双击空白处新建卡片")}</p>
+          <p>{t("或把文件、图片拖进来")}</p>
         </div>
       )}
 
       {minimapOpen && <Minimap elements={doc.elements} screen={size} />}
 
+      {find.open && (
+        <FindBar
+          query={find.query}
+          index={Math.min(find.index, Math.max(matches.length - 1, 0))}
+          total={matches.length}
+          onQuery={(query) => setFind((f) => ({ ...f, query, index: 0, nav: f.nav + 1 }))}
+          onStep={(delta) => {
+            const n = matches.length;
+            if (n === 0) return;
+            setFind((f) => ({ ...f, index: (Math.min(f.index, n - 1) + delta + n) % n, nav: f.nav + 1 }));
+          }}
+          onClose={() => setFind((f) => ({ ...f, open: false }))}
+        />
+      )}
+
       <Toolbar
         minimapOpen={minimapOpen}
         onAddText={() => canvas().addElements([newTextCard(viewCenterWorld())], { edit: true })}
         onAddFiles={() => void pickFiles()}
+        onAddFolder={() => void pickFiles(undefined, true)}
         onGroup={() => canvas().groupSelection()}
         onZoom={zoomBy}
         onFit={fitAll}
@@ -619,10 +815,12 @@ function Toolbar(props: {
   minimapOpen: boolean;
   onAddText(): void;
   onAddFiles(): void;
+  onAddFolder(): void;
   onGroup(): void;
   onZoom(factor: number): void;
   onFit(): void;
 }) {
+  useT();
   const canUndo = useCanvasStore((s) => s.canUndo);
   const canRedo = useCanvasStore((s) => s.canRedo);
   const hasSelection = useCanvasStore((s) => s.selectedIds.length > 0);
@@ -631,42 +829,46 @@ function Toolbar(props: {
   const stop = (e: ReactPointerEvent) => e.stopPropagation();
   return (
     <div className="canvas-toolbar" onPointerDown={stop} onDoubleClick={(e) => e.stopPropagation()}>
-      <button className="tb-btn" onClick={props.onAddText} title="新建文本卡片（T）">
+      <button className="tb-btn" onClick={props.onAddText} title={t("新建文本卡片（T）")}>
         <StickyNote size={16} />
-        <span>文本</span>
+        <span>{t("文本")}</span>
       </button>
-      <button className="tb-btn" onClick={props.onAddFiles} title="插入文件或图片">
+      <button className="tb-btn" onClick={props.onAddFiles} title={t("插入文件或图片")}>
         <Paperclip size={16} />
-        <span>文件</span>
+        <span>{t("文件")}</span>
       </button>
-      <button className="tb-btn" onClick={props.onGroup} disabled={!hasSelection} title="把选中的卡片放进分组框（Ctrl+G）">
+      <button className="tb-btn" onClick={props.onAddFolder} title={t("插入文件夹（变成一个分组）")}>
+        <FolderPlus size={16} />
+        <span>{t("文件夹")}</span>
+      </button>
+      <button className="tb-btn" onClick={props.onGroup} disabled={!hasSelection} title={t("把选中的卡片放进分组框（Ctrl+G）")}>
         <Group size={16} />
-        <span>分组</span>
+        <span>{t("分组")}</span>
       </button>
       <span className="tb-sep" />
-      <button className="tb-icon" onClick={() => canvas().undo()} disabled={!canUndo} title="撤销（Ctrl+Z）">
+      <button className="tb-icon" onClick={() => canvas().undo()} disabled={!canUndo} title={t("撤销（Ctrl+Z）")}>
         <Undo2 size={16} />
       </button>
-      <button className="tb-icon" onClick={() => canvas().redo()} disabled={!canRedo} title="重做（Ctrl+Shift+Z）">
+      <button className="tb-icon" onClick={() => canvas().redo()} disabled={!canRedo} title={t("重做（Ctrl+Shift+Z）")}>
         <Redo2 size={16} />
       </button>
       <span className="tb-sep" />
-      <button className="tb-icon" onClick={() => props.onZoom(0.8)} title="缩小（Ctrl+-）">
+      <button className="tb-icon" onClick={() => props.onZoom(0.8)} title={t("缩小（Ctrl+-）")}>
         <Minus size={16} />
       </button>
-      <button className="tb-zoom" onClick={() => props.onZoom(100 / zoomPercent)} title="恢复 100%（Ctrl+0）">
+      <button className="tb-zoom" onClick={() => props.onZoom(100 / zoomPercent)} title={t("恢复 100%（Ctrl+0）")}>
         {zoomPercent}%
       </button>
-      <button className="tb-icon" onClick={() => props.onZoom(1.25)} title="放大（Ctrl+=）">
+      <button className="tb-icon" onClick={() => props.onZoom(1.25)} title={t("放大（Ctrl+=）")}>
         <Plus size={16} />
       </button>
-      <button className="tb-icon" onClick={props.onFit} title="显示全部内容（Shift+1）">
+      <button className="tb-icon" onClick={props.onFit} title={t("显示全部内容（Shift+1）")}>
         <Maximize size={16} />
       </button>
       <button
         className={`tb-icon${props.minimapOpen ? " is-on" : ""}`}
         onClick={() => useAppStore.getState().toggleMinimap()}
-        title="显示 / 隐藏小地图"
+        title={t("显示 / 隐藏小地图")}
       >
         <MapIcon size={16} />
       </button>

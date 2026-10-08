@@ -1,6 +1,7 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { create } from "zustand";
-import { useAppStore } from "@/store/appStore";
+import { t } from "@/i18n";
+import { projectLabel, useAppStore } from "@/store/appStore";
 import type { CanvasMeta, ID } from "@/types/model";
 
 /**
@@ -66,9 +67,9 @@ async function moveCanvas(canvas: CanvasMeta, projectId: ID) {
   const project = app.projects.find((p) => p.id === projectId);
   try {
     await app.updateCanvas(canvas.id, { projectId });
-    app.showToast(`已把「${canvas.title}」移到「${project?.name ?? "项目"}」`);
+    app.showToast(t("已把「{canvas}」移到「{project}」", { canvas: canvas.title, project: project ? projectLabel(project) : t("项目") }));
   } catch (e) {
-    app.showToast(`移动失败：${String(e)}`);
+    app.showToast(t("移动失败：{error}", { error: String(e) }));
   }
 }
 

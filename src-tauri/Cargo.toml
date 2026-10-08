@@ -1,6 +1,6 @@
 [package]
 name = "lattira"
-version = "0.1.0"
+version = "0.3.0"
 description = "栖页 · Lattira：画布式知识库与文件管理"
 edition = "2021"
 publish = false
@@ -35,6 +35,7 @@ windows = { version = "0.62", features = [
   "Storage_Streams",
   "Win32_System_WinRT",
 ] }
+clipboard-win = "5"
 
 [profile.release]
 codegen-units = 1

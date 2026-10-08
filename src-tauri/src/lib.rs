@@ -1,3 +1,4 @@
+mod clipboard;
 mod commands;
 mod db;
 mod error;
@@ -25,9 +26,19 @@ pub fn run() {
             commands::load_canvas,
             commands::save_canvas,
             commands::import_paths,
+            commands::import_tree,
             commands::import_bytes,
             commands::list_assets,
             commands::open_asset,
+            commands::reveal_asset,
+            commands::reveal_canvas,
+            commands::reveal_project,
+            commands::reveal_workspace,
+            commands::copy_asset_to,
+            commands::delete_assets,
+            commands::rename_asset,
+            commands::copy_cards,
+            commands::read_clipboard,
             commands::calendar_days,
             commands::search,
         ])

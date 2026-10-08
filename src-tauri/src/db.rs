@@ -82,6 +82,9 @@ CREATE INDEX canvas_days_date ON canvas_days(date);
 ALTER TABLE assets ADD COLUMN ocr_text TEXT;
 -- 画布缩略图数据（前端生成的精简布局 JSON）
 ALTER TABLE canvases ADD COLUMN preview TEXT;
+"#, r#"
+-- 项目图标（图标名），为空时显示圆点
+ALTER TABLE projects ADD COLUMN icon TEXT;
 "#];
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {

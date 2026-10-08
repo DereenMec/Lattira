@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { backend, type CanvasPatch, type ProjectPatch } from "@/services/backend";
 import { seedWelcomeCanvas } from "@/features/workspace/seed";
+import { t } from "@/i18n";
 import type { Asset, CanvasMeta, ID, Project, WorkspaceInfo } from "@/types/model";
 import { PROJECT_COLORS } from "@/types/model";
 
@@ -67,6 +68,9 @@ let unsubscribeAssets: (() => void) | undefined;
 
 export const inboxOf = (projects: Project[]) => projects.find((p) => p.isInbox);
 
+/** 界面上显示的项目名：「未分类」随界面语言翻译，其余项目用自己的名字 */
+export const projectLabel = (p: Pick<Project, "isInbox" | "name">) => (p.isInbox ? t("未分类") : p.name);
+
 export const useAppStore = create<AppState>()((set, get) => {
   async function enter(ws: WorkspaceInfo) {
     const [projects, canvases, assets] = await Promise.all([
@@ -75,12 +79,12 @@ export const useAppStore = create<AppState>()((set, get) => {
       backend.listAssets(),
     ]);
     const inbox = inboxOf(projects);
-    if (!inbox) throw new Error("工作区缺少未分类项目");
+    if (!inbox) throw new Error(t("工作区缺少未分类项目"));
 
     let all = canvases;
     if (ws.isNew && canvases.length === 0) {
       // 先写好欢迎画布再进入，避免画布视图读到空文件
-      const meta = await backend.createCanvas(inbox.id, "欢迎使用栖页");
+      const meta = await backend.createCanvas(inbox.id, t("欢迎使用栖页"));
       all = [await seedWelcomeCanvas(meta.id)];
     }
     const latest = [...all].sort((a, b) => b.updatedAt - a.updatedAt)[0];
@@ -116,7 +120,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         else set({ status: "no-workspace" });
       } catch (e) {
         set({ status: "no-workspace" });
-        get().showToast(`打开上次的工作区失败：${String(e)}`);
+        get().showToast(t("打开上次的工作区失败：{error}", { error: String(e) }));
       }
     },
 
@@ -125,7 +129,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         const ws = await backend.pickWorkspace();
         if (ws) await enter(ws);
       } catch (e) {
-        get().showToast(`打开工作区失败：${String(e)}`);
+        get().showToast(t("打开工作区失败：{error}", { error: String(e) }));
       }
     },
 
@@ -157,7 +161,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       set((s) => ({ projects: s.projects.map((x) => (x.id === id ? p : x)) }));
     },
 
-    async createCanvas(projectId, title = "未命名画布") {
+    async createCanvas(projectId, title = t("未命名画布")) {
       const meta = await backend.createCanvas(projectId, title);
       set((s) => ({ canvases: [...s.canvases, meta], view: { kind: "canvas", canvasId: meta.id } }));
       return meta;

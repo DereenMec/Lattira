@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type MouseEvent as ReactMouseEvent } from "react";
 import { center, rectEdgePoint, type Point } from "@/lib/geometry";
 import type { CanvasElement, Edge, ID } from "@/types/model";
 
@@ -9,9 +9,10 @@ interface Props {
   /** 正在拖出的连线预览 */
   pending: { fromId: ID; to: Point } | null;
   onSelect(id: ID): void;
+  onContextMenu(e: ReactMouseEvent, id: ID): void;
 }
 
-function EdgeLayerImpl({ edges, elements, selectedEdgeId, pending, onSelect }: Props) {
+function EdgeLayerImpl({ edges, elements, selectedEdgeId, pending, onSelect, onContextMenu }: Props) {
   const byId = new Map(elements.map((e) => [e.id, e]));
 
   const segment = (from: CanvasElement, toPoint: Point, to?: CanvasElement) => {
@@ -47,6 +48,7 @@ function EdgeLayerImpl({ edges, elements, selectedEdgeId, pending, onSelect }: P
                 e.stopPropagation();
                 onSelect(edge.id);
               }}
+              onContextMenu={(e) => onContextMenu(e, edge.id)}
             />
             <path
               d={d}

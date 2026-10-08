@@ -1,5 +1,7 @@
 # 栖页 · Lattira
 
+By z00613494
+
 画布式的个人知识库与文件管理工具：文本、文件和图片都是画布上的卡片，画布按项目归档，也能在日历中按编辑日期回溯。仅支持 Windows 桌面端。
 
 产品设计文档：<https://claude.ai/code/artifact/5fb90891-2d57-4dd8-94c5-16a0d58158a9>
@@ -13,6 +15,7 @@
 | 画布引擎 | 自研，基于 DOM + CSS transform，连线用 SVG |
 | 本地服务 | Rust：SQLite（rusqlite）、SHA-256 去重、Windows 自带 OCR（Windows.Media.Ocr） |
 | 画布文件格式 | 兼容 [JSON Canvas](https://jsoncanvas.org)，扩展字段放在 `lattira` 下 |
+| 字体 | 内置 [Maple Mono NF CN](https://github.com/subframe7536/maple-font)（OFL-1.1，Regular / SemiBold，WOFF2） |
 
 ## 开发环境
 
@@ -26,6 +29,7 @@ npm install
 npm run tauri dev     # 启动桌面端（会自动启动 Vite）
 npm run dev           # 只在浏览器里调界面，数据存在 localStorage
 npm run typecheck     # 前端类型检查
+npm run i18n:check    # 检查英文翻译是否齐全
 npm run build && npx vite preview --port 5480   # 生产构建，浏览器打开 http://localhost:5480/?perf 可做性能测试
 cd src-tauri && cargo test   # 后端单元测试
 npm run tauri build   # 打包 NSIS 安装程序
@@ -82,7 +86,19 @@ src-tauri/src/
 - [x] 日历月视图：画布出现在它被编辑过的每一天
 - [x] 资源库：按类型筛选、引用计数、空间统计
 - [x] 全局搜索（Ctrl+E）：画布名、卡片文字、文件名、图片中的文字（OCR），点击跳到对应卡片
+- [x] 画布内查找（Ctrl+F）：当前画布中的卡片文字、分组标题、文件名和图片中的文字，Enter / Shift+Enter 在结果间跳转
 - [x] 大画布性能：视口外元素不渲染、平移不经过 React、缩小时简化绘制
+- [x] 复制粘贴卡片（Ctrl+C / Ctrl+V）：文件与图片以文件形式复制，可直接粘贴到微信、资源管理器；文本卡片复制为文字；粘贴回画布时保留布局与连线
+- [x] 右键菜单：卡片（打开、在资源管理器中显示、复制图片 / 文字 / 路径、另存为、对齐、分布、颜色、叠放次序、创建副本）、画布空白处、连线、画布卡片、项目、资源
+- [x] 文本卡片双击打开大窗口编辑
+- [x] 按类型显示文件图标（来自 vscode-icons，MIT）
+- [x] 未选中卡片时，检查器列出画布中的全部文件
+- [x] 资源库列表视图（类似资源管理器「详细信息」，可按列排序）
+- [x] 资源库：独立搜索框（文件名与图片中的文字，Ctrl+E / Ctrl+F 聚焦）、多选（Ctrl / Shift + 单击、Ctrl+A）删除
+- [x] 项目图标与颜色：28 种图标、16 种预设颜色和自定义取色
+- [x] 导入文件夹：文件夹变成分组框，文件按网格紧凑排列（列数让分组宽高比接近 2:1），子文件夹成为嵌套分组
+- [x] 重命名文件（磁盘上的文件一起改名）
+- [x] 中英文界面切换、关于界面（版本、工作区信息、更新内容）
 
 ## 性能验证
 
@@ -100,7 +116,6 @@ src-tauri/src/
 
 ## 待完成
 
-- [ ] 拖入文件夹（目前只支持文件）
 - [ ] 回收站界面（删除的画布已保存在 `.lattira/trash/`）
 - [ ] 文件卡片的内置预览（PDF 等）
 - [ ] 大画布：越过预渲染区域时分批挂载

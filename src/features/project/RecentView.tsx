@@ -1,12 +1,14 @@
-import { Clock } from "lucide-react";
+import { Clock, Plus } from "lucide-react";
 import { useMemo } from "react";
 import { addDays, toLocalDate } from "@/lib/date";
-import { useAppStore } from "@/store/appStore";
+import { msg, useT } from "@/i18n";
+import { inboxOf, useAppStore } from "@/store/appStore";
 import type { CanvasMeta } from "@/types/model";
 import { CanvasCard } from "./CanvasCard";
 
 /** 最近编辑过的画布，按时间降序，分组显示 */
 export function RecentView() {
+  const t = useT();
   const canvases = useAppStore((s) => s.canvases);
 
   const groups = useMemo(() => {
@@ -15,10 +17,10 @@ export function RecentView() {
     const yesterdayKey = toLocalDate(addDays(today, -1));
     const weekAgo = addDays(new Date(today.getFullYear(), today.getMonth(), today.getDate()), -6).getTime();
     const buckets: { label: string; items: CanvasMeta[] }[] = [
-      { label: "今天", items: [] },
-      { label: "昨天", items: [] },
-      { label: "最近 7 天", items: [] },
-      { label: "更早", items: [] },
+      { label: msg("今天"), items: [] },
+      { label: msg("昨天"), items: [] },
+      { label: msg("最近 7 天"), items: [] },
+      { label: msg("更早"), items: [] },
     ];
     for (const c of [...canvases].sort((a, b) => b.updatedAt - a.updatedAt)) {
       const key = toLocalDate(new Date(c.updatedAt));
@@ -28,23 +30,35 @@ export function RecentView() {
     return buckets.filter((b) => b.items.length > 0);
   }, [canvases]);
 
+  /** 新画布放进「未分类」，之后可以拖到某个项目 */
+  const newCanvas = async () => {
+    const app = useAppStore.getState();
+    const inbox = inboxOf(app.projects);
+    if (inbox) await app.createCanvas(inbox.id);
+  };
+
   return (
     <div className="page project-page">
       <header className="page-head">
-        <h1>最近</h1>
-        <span className="page-sub">{canvases.length} 个画布</span>
+        <h1>{t("最近")}</h1>
+        <span className="page-sub">{t("{n} 个画布", { n: canvases.length })}</span>
+        <div className="page-actions">
+          <button className="btn primary" onClick={() => void newCanvas()} title={t("新画布放在「未分类」里")}>
+            <Plus size={14} /> {t("新建画布")}
+          </button>
+        </div>
       </header>
-      <p className="page-desc">所有项目里的画布，按最后编辑时间从近到远排列。</p>
+      <p className="page-desc">{t("所有项目里的画布，按最后编辑时间从近到远排列。")}</p>
 
       {groups.length === 0 ? (
         <div className="empty-block">
           <Clock size={28} />
-          <p>还没有画布</p>
+          <p>{t("还没有画布")}</p>
         </div>
       ) : (
         groups.map((g) => (
           <section key={g.label} className="recent-group">
-            <h2>{g.label}</h2>
+            <h2>{t(g.label)}</h2>
             <div className="canvas-grid">
               {g.items.map((c) => (
                 <CanvasCard key={c.id} canvas={c} showProject />

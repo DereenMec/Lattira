@@ -1,14 +1,15 @@
 {
   "name": "lattira",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "i18n:check": "node scripts/check-i18n.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.1",

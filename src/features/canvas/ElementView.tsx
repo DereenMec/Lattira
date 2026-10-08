@@ -1,5 +1,7 @@
-import { FileText, ImageOff } from "lucide-react";
-import { memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { ImageOff } from "lucide-react";
+import { memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useT } from "@/i18n";
+import { fileIconUrl } from "@/lib/fileIcons";
 import { fileExtension, formatBytes } from "@/lib/format";
 import type { Asset, CanvasElement, ID } from "@/types/model";
 
@@ -8,6 +10,7 @@ export interface ElementHandlers {
   onResizeStart(e: ReactPointerEvent, id: ID): void;
   onConnectStart(e: ReactPointerEvent, id: ID): void;
   onDoubleClick(id: ID): void;
+  onContextMenu(e: ReactMouseEvent, id: ID): void;
   onFinishEdit(id: ID, value: string): void;
 }
 
@@ -18,6 +21,8 @@ interface Props {
   showHandles: boolean;
   editing: boolean;
   highlighted: boolean;
+  /** 命中画布内查找 */
+  matched: boolean;
   /** 缩得很小时只画首行文字，减少排版开销 */
   lod: boolean;
   asset?: Asset;
@@ -25,7 +30,8 @@ interface Props {
   handlers: ElementHandlers;
 }
 
-function ElementViewImpl({ el, selected, showHandles, editing, highlighted, lod, asset, assetUrl, handlers }: Props) {
+function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matched, lod, asset, assetUrl, handlers }: Props) {
+  const t = useT();
   const isSection = el.type === "section";
   const className = [
     "el",
@@ -34,6 +40,7 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, lod,
     selected ? "is-selected" : "",
     editing ? "is-editing" : "",
     highlighted ? "is-highlighted" : "",
+    matched ? "is-match" : "",
     lod ? "is-lod" : "",
   ]
     .filter(Boolean)
@@ -46,6 +53,7 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, lod,
       data-element-id={el.id}
       onPointerDown={isSection ? undefined : (e) => handlers.onPointerDown(e, el.id)}
       onDoubleClick={isSection ? undefined : () => handlers.onDoubleClick(el.id)}
+      onContextMenu={isSection ? undefined : (e) => handlers.onContextMenu(e, el.id)}
     >
       {el.type === "text" &&
         (editing ? (
@@ -53,7 +61,7 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, lod,
         ) : lod ? (
           <div className="el-text-lod">{firstLine(el.text)}</div>
         ) : (
-          <div className="el-text-body">{el.text || <span className="placeholder">空白卡片</span>}</div>
+          <div className="el-text-body">{el.text || <span className="placeholder">{t("空白卡片")}</span>}</div>
         ))}
 
       {el.type === "image" &&
@@ -62,18 +70,20 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, lod,
         ) : (
           <div className="el-missing">
             <ImageOff size={20} />
-            <span>{asset?.name ?? "图片不可用"}</span>
+            <span>{asset?.name ?? t("图片不可用")}</span>
           </div>
         ))}
 
       {el.type === "file" && (
         <div className="el-file-body">
-          <div className="file-badge">{fileExtension(asset?.name ?? "").toUpperCase() || <FileText size={18} />}</div>
+          <img className="file-icon" src={fileIconUrl(asset?.name ?? "")} alt="" draggable={false} />
           <div className="file-meta">
             <div className="file-name" title={asset?.name}>
-              {asset?.name ?? "文件不可用"}
+              {asset?.name ?? t("文件不可用")}
             </div>
-            <div className="file-sub">{asset ? `${formatBytes(asset.size)} · 双击打开` : ""}</div>
+            <div className="file-sub">
+              {asset ? `${fileExtension(asset.name).toUpperCase() || t("文件")} · ${formatBytes(asset.size)}` : ""}
+            </div>
           </div>
         </div>
       )}
@@ -83,20 +93,21 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, lod,
           className="el-section-label"
           onPointerDown={(e) => handlers.onPointerDown(e, el.id)}
           onDoubleClick={() => handlers.onDoubleClick(el.id)}
+          onContextMenu={(e) => handlers.onContextMenu(e, el.id)}
         >
           {editing ? (
             <TextEditor initial={el.label} onDone={(v) => handlers.onFinishEdit(el.id, v)} />
           ) : (
-            el.label || "未命名分组"
+            el.label || t("未命名分组")
           )}
         </div>
       )}
 
       {showHandles && !editing && (
         <>
-          <div className="handle-resize" onPointerDown={(e) => handlers.onResizeStart(e, el.id)} title="拖动调整大小" />
+          <div className="handle-resize" onPointerDown={(e) => handlers.onResizeStart(e, el.id)} title={t("拖动调整大小")} />
           {!isSection && (
-            <div className="handle-connect" onPointerDown={(e) => handlers.onConnectStart(e, el.id)} title="拖到另一张卡片上连线" />
+            <div className="handle-connect" onPointerDown={(e) => handlers.onConnectStart(e, el.id)} title={t("拖到另一张卡片上连线")} />
           )}
         </>
       )}

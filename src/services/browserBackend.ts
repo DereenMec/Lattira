@@ -1,8 +1,9 @@
+import { t } from "@/i18n";
 import { toLocalDate } from "@/lib/date";
 import { uuidv7 } from "@/lib/id";
 import type { Asset, CanvasDay, CanvasMeta, ID, Project, SearchHit, WorkspaceInfo } from "@/types/model";
 import { PROJECT_COLORS } from "@/types/model";
-import type { Backend } from "./backend";
+import type { Backend, CopyPayload } from "./backend";
 
 /**
  * 浏览器预览用的存储：数据存在 localStorage，仅用于开发界面。
@@ -36,6 +37,7 @@ export function createBrowserBackend(): Backend {
   // 早期版本叫「收件箱」
   for (const p of state.projects) if (p.isInbox && p.name === "收件箱") p.name = "未分类";
   const blobUrls = new Map<ID, string>();
+  let copied: CopyPayload | null = null;
 
   const persist = () => {
     try {
@@ -47,7 +49,7 @@ export function createBrowserBackend(): Backend {
 
   const findCanvas = (id: ID) => {
     const c = state.canvases.find((c) => c.id === id);
-    if (!c) throw new Error(`画布不存在：${id}`);
+    if (!c) throw new Error(t("画布不存在：{id}", { id }));
     return c;
   };
 
@@ -79,7 +81,7 @@ export function createBrowserBackend(): Backend {
     },
     async pickWorkspace() {
       const now = Date.now();
-      state.workspace = { path: "browser://lattira", name: "浏览器预览工作区", isNew: true };
+      state.workspace = { path: "browser://lattira", name: t("浏览器预览工作区"), isNew: true };
       if (!state.projects.some((p) => p.isInbox)) {
         state.projects.push({
           id: uuidv7(),
@@ -108,7 +110,7 @@ export function createBrowserBackend(): Backend {
     },
     async updateProject(id, patch) {
       const p = state.projects.find((p) => p.id === id);
-      if (!p) throw new Error(`项目不存在：${id}`);
+      if (!p) throw new Error(t("项目不存在：{id}", { id }));
       Object.assign(p, patch, { updatedAt: Date.now() });
       persist();
       return { ...p };
@@ -163,7 +165,10 @@ export function createBrowserBackend(): Backend {
     },
 
     async importPaths() {
-      throw new Error("浏览器预览模式不支持按路径导入");
+      throw new Error(t("浏览器预览模式不支持按路径导入"));
+    },
+    async importTree() {
+      throw new Error(t("浏览器预览模式不支持按路径导入"));
     },
     async importBlobs(files) {
       const out: Asset[] = [];
@@ -172,7 +177,7 @@ export function createBrowserBackend(): Backend {
         const hash = await sha256(buf);
         let asset = state.assets.find((a) => a.hash === hash);
         if (!asset) {
-          const name = f.name || "粘贴的图片.png";
+          const name = f.name || t("粘贴的图片.png");
           asset = {
             id: uuidv7(),
             hash,
@@ -205,6 +210,72 @@ export function createBrowserBackend(): Backend {
       if (url) window.open(url, "_blank");
     },
 
+    assetPath() {
+      return "";
+    },
+    async revealAsset() {
+      throw new Error(t("浏览器预览模式下无法打开资源管理器"));
+    },
+    async revealCanvas() {
+      throw new Error(t("浏览器预览模式下无法打开资源管理器"));
+    },
+    async revealProject() {
+      throw new Error(t("浏览器预览模式下无法打开资源管理器"));
+    },
+    async revealWorkspace() {
+      throw new Error(t("浏览器预览模式下无法打开资源管理器"));
+    },
+    async renameAsset(asset, name) {
+      const a = state.assets.find((x) => x.id === asset.id);
+      if (!a) throw new Error(t("资源不存在：{id}", { id: asset.id }));
+      const trimmed = name.trim();
+      const ext = a.name.includes(".") ? a.name.slice(a.name.lastIndexOf(".")) : "";
+      a.name = trimmed.includes(".") ? trimmed : trimmed + ext;
+      persist();
+      return { ...a, refCount: asset.refCount };
+    },
+    async saveAssetCopy(asset) {
+      const url = blobUrls.get(asset.id);
+      if (!url) return false;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = asset.name;
+      a.click();
+      return true;
+    },
+    async deleteAssets(ids) {
+      const gone = new Set(ids);
+      const canvasIds: ID[] = [];
+      let removedCards = 0;
+      for (const [canvasId, refs] of Object.entries(state.assetRefs)) {
+        if (!refs.some((id) => gone.has(id))) continue;
+        const raw = localStorage.getItem(contentKey(canvasId));
+        if (raw) {
+          const doc = JSON.parse(raw) as { nodes: { id: string; lattira?: { assetId?: string } }[]; edges: { fromNode: string; toNode: string }[] };
+          const removed = new Set(doc.nodes.filter((n) => n.lattira?.assetId && gone.has(n.lattira.assetId)).map((n) => n.id));
+          doc.nodes = doc.nodes.filter((n) => !removed.has(n.id));
+          doc.edges = doc.edges.filter((e) => !removed.has(e.fromNode) && !removed.has(e.toNode));
+          localStorage.setItem(contentKey(canvasId), JSON.stringify(doc, null, 2));
+          removedCards += removed.size;
+          const c = state.canvases.find((x) => x.id === canvasId);
+          if (c) c.elementCount = doc.nodes.length;
+          canvasIds.push(canvasId);
+        }
+        state.assetRefs[canvasId] = refs.filter((id) => !gone.has(id));
+      }
+      state.assets = state.assets.filter((a) => !gone.has(a.id));
+      for (const id of ids) blobUrls.delete(id);
+      persist();
+      return { canvasIds, removedCards };
+    },
+    // 浏览器无法写入文件剪贴板：只复制纯文本，卡片数据留在内存里供本页粘贴
+    async copyCards(payload) {
+      copied = payload;
+      if (payload.plainText.trim()) await navigator.clipboard.writeText(payload.plainText).catch(() => {});
+    },
+    async readClipboard() {
+      return { cards: copied?.cards ?? null, files: [], text: null };
+    },
     subscribeAssetUpdates() {
       return () => {};
     },

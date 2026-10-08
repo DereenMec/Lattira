@@ -15,6 +15,7 @@ import type {
   SectionElement,
   Viewport,
 } from "@/types/model";
+import { t } from "@/i18n";
 import { useAppStore } from "./appStore";
 
 /** 撤销历史与变化统计只关心元素和连线；视口变化不算编辑 */
@@ -27,6 +28,8 @@ type ElementPatch = Partial<Omit<CanvasElement, "id" | "type">> & { text?: strin
 
 type SaveState = "saved" | "pending" | "saving" | "error";
 
+export type AlignMode = "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom";
+
 interface CanvasState {
   /** 画布内容；其中的 viewport 只在加载和保存时使用，平时以下面的 viewport 为准 */
   doc: CanvasDoc | null;
@@ -35,6 +38,10 @@ interface CanvasState {
   selectedIds: ID[];
   selectedEdgeId: ID | null;
   editingId: ID | null;
+  /** 正在大窗口中编辑的文本卡片 */
+  editorId: ID | null;
+  /** 请求画布把某个元素移到视口中央；n 递增以便重复定位同一元素 */
+  focusRequest: { id: ID; n: number } | null;
   saveState: SaveState;
   canUndo: boolean;
   canRedo: boolean;
@@ -49,10 +56,25 @@ interface CanvasState {
   setEditing(id: ID | null): void;
 
   addElements(elements: CanvasElement[], opts?: { select?: boolean; edit?: boolean }): void;
+  /** 粘贴：一次插入一批元素和它们之间的连线，并选中这些元素 */
+  insertCards(elements: CanvasElement[], edges: Edge[]): void;
   updateElements(patches: Record<ID, ElementPatch>): void;
   deleteSelection(): void;
   addEdge(fromId: ID, toId: ID): void;
+  reverseEdge(id: ID): void;
   groupSelection(): void;
+  /** 删除分组框，保留框内元素 */
+  ungroup(sectionId: ID): void;
+  /** 创建副本，偏移一点放置，并复制它们之间的连线 */
+  duplicate(ids: ID[]): void;
+  /** 调整叠放次序（分组框始终在普通卡片之下） */
+  reorder(ids: ID[], where: "front" | "back"): void;
+  align(ids: ID[], mode: AlignMode): void;
+  distribute(ids: ID[], axis: "x" | "y"): void;
+
+  openEditor(id: ID): void;
+  closeEditor(): void;
+  requestFocus(id: ID): void;
 
   /** 拖动、缩放等连续手势：开始时记一次历史，过程中的更新不进历史 */
   beginGesture(): void;
@@ -152,7 +174,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
         if (get().doc?.canvasId === doc.canvasId && saveTimer === undefined) set({ saveState: "saved" });
       } catch (e) {
         set({ saveState: "error" });
-        useAppStore.getState().showToast(`保存失败：${String(e)}`);
+        useAppStore.getState().showToast(t("保存失败：{error}", { error: String(e) }));
       }
     };
     savingPromise = run();
@@ -166,6 +188,8 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
     selectedIds: [],
     selectedEdgeId: null,
     editingId: null,
+    editorId: null,
+    focusRequest: null,
     saveState: "saved",
     canUndo: false,
     canRedo: false,
@@ -183,6 +207,8 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
         selectedIds: [],
         selectedEdgeId: null,
         editingId: null,
+        editorId: null,
+        focusRequest: null,
         saveState: "saved",
         canUndo: false,
         canRedo: false,
@@ -224,6 +250,12 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       if (opts.edit && elements.length === 1) set({ editingId: elements[0].id });
     },
 
+    insertCards(elements, edges) {
+      if (elements.length === 0) return;
+      commit((s) => ({ elements: [...s.elements, ...elements], edges: [...s.edges, ...edges] }));
+      set({ selectedIds: elements.map((e) => e.id), selectedEdgeId: null });
+    },
+
     updateElements(patches) {
       const now = Date.now();
       commit((s) => ({ ...s, elements: applyPatches(s.elements, patches, now) }));
@@ -254,6 +286,85 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       set({ selectedEdgeId: edge.id, selectedIds: [] });
     },
 
+    reverseEdge(id) {
+      commit((s) => ({
+        ...s,
+        edges: s.edges.map((e) => (e.id === id ? { ...e, fromId: e.toId, toId: e.fromId } : e)),
+      }));
+    },
+
+    ungroup(sectionId) {
+      commit((s) => ({ ...s, elements: s.elements.filter((e) => e.id !== sectionId) }));
+      set({ selectedIds: [] });
+    },
+
+    duplicate(ids) {
+      const { doc } = get();
+      if (!doc || ids.length === 0) return;
+      const now = Date.now();
+      const idMap = new Map<ID, ID>();
+      const copies = doc.elements
+        .filter((e) => ids.includes(e.id))
+        .map((e) => {
+          const id = uuidv7();
+          idMap.set(e.id, id);
+          return { ...e, id, x: e.x + 32, y: e.y + 32, createdAt: now, updatedAt: now } as CanvasElement;
+        });
+      const edges = doc.edges
+        .filter((e) => idMap.has(e.fromId) && idMap.has(e.toId))
+        .map((e) => ({ ...e, id: uuidv7(), fromId: idMap.get(e.fromId)!, toId: idMap.get(e.toId)! }));
+      commit((s) => ({ elements: [...s.elements, ...copies], edges: [...s.edges, ...edges] }));
+      set({ selectedIds: copies.map((c) => c.id), selectedEdgeId: null });
+    },
+
+    reorder(ids, where) {
+      const set_ = new Set(ids);
+      commit((s) => {
+        const picked = s.elements.filter((e) => set_.has(e.id));
+        const rest = s.elements.filter((e) => !set_.has(e.id));
+        return { ...s, elements: where === "front" ? [...rest, ...picked] : [...picked, ...rest] };
+      });
+    },
+
+    align(ids, mode) {
+      const { doc } = get();
+      const els = doc?.elements.filter((e) => ids.includes(e.id)) ?? [];
+      const b = boundsOf(els);
+      if (!b || els.length < 2) return;
+      const patches: Record<ID, ElementPatch> = {};
+      for (const e of els) {
+        if (mode === "left") patches[e.id] = { x: b.x };
+        else if (mode === "hcenter") patches[e.id] = { x: b.x + (b.width - e.width) / 2 };
+        else if (mode === "right") patches[e.id] = { x: b.x + b.width - e.width };
+        else if (mode === "top") patches[e.id] = { y: b.y };
+        else if (mode === "vcenter") patches[e.id] = { y: b.y + (b.height - e.height) / 2 };
+        else patches[e.id] = { y: b.y + b.height - e.height };
+      }
+      get().updateElements(patches);
+    },
+
+    distribute(ids, axis) {
+      const { doc } = get();
+      const els = (doc?.elements.filter((e) => ids.includes(e.id)) ?? []).sort((a, b) => a[axis] - b[axis]);
+      if (els.length < 3) return;
+      const size = axis === "x" ? "width" : "height";
+      const first = els[0];
+      const last = els[els.length - 1];
+      const total = els.reduce((sum, e) => sum + e[size], 0);
+      const gap = (last[axis] + last[size] - first[axis] - total) / (els.length - 1);
+      const patches: Record<ID, ElementPatch> = {};
+      let cursor = first[axis];
+      for (const e of els) {
+        patches[e.id] = { [axis]: cursor };
+        cursor += e[size] + gap;
+      }
+      get().updateElements(patches);
+    },
+
+    openEditor: (editorId) => set({ editorId, editingId: null }),
+    closeEditor: () => set({ editorId: null }),
+    requestFocus: (id) => set((s) => ({ focusRequest: { id, n: (s.focusRequest?.n ?? 0) + 1 } })),
+
     groupSelection() {
       const { doc, selectedIds } = get();
       if (!doc || selectedIds.length === 0) return;
@@ -265,7 +376,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       const section: SectionElement = {
         id: uuidv7(),
         type: "section",
-        label: "新分组",
+        label: t("新分组"),
         x: b.x - pad,
         y: b.y - pad - 24,
         width: b.width + pad * 2,

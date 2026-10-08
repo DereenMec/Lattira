@@ -1,14 +1,81 @@
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, LocateFixed } from "lucide-react";
+import { useMemo } from "react";
+import { openContextMenu } from "@/features/menu/ContextMenu";
+import { assetEntries } from "@/features/menu/menus";
+import { msg, useT } from "@/i18n";
 import { formatRelative } from "@/lib/date";
-import { formatBytes, isOcrMime } from "@/lib/format";
+import { fileIconUrl } from "@/lib/fileIcons";
+import { formatBytes, isImageMime, isOcrMime } from "@/lib/format";
 import { backend } from "@/services/backend";
-import { useAppStore } from "@/store/appStore";
+import { projectLabel, useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
-import { CARD_COLORS, type CanvasMeta, type CardColor } from "@/types/model";
+import { CARD_COLORS, type Asset, type CanvasMeta, type CardColor, type ID } from "@/types/model";
 
-const TYPE_LABEL = { text: "文本卡片", image: "图片", file: "文件", section: "分组框" } as const;
+const TYPE_LABEL = { text: msg("文本卡片"), image: msg("图片"), file: msg("文件"), section: msg("分组框") } as const;
+
+/** 当前画布引用的全部文件与图片；单击定位到卡片，双击打开，右键更多操作 */
+function CanvasFileList() {
+  const t = useT();
+  const elements = useCanvasStore((s) => s.doc?.elements);
+  const assets = useAppStore((s) => s.assets);
+
+  const rows = useMemo(() => {
+    const byAsset = new Map<ID, { asset: Asset; elementIds: ID[] }>();
+    for (const el of elements ?? []) {
+      if (el.type !== "image" && el.type !== "file") continue;
+      const asset = assets.get(el.assetId);
+      if (!asset) continue;
+      const row = byAsset.get(asset.id) ?? { asset, elementIds: [] };
+      row.elementIds.push(el.id);
+      byAsset.set(asset.id, row);
+    }
+    return [...byAsset.values()].sort((a, b) => a.asset.name.localeCompare(b.asset.name, "zh-CN"));
+  }, [elements, assets]);
+
+  const total = rows.reduce((sum, r) => sum + r.asset.size, 0);
+
+  return (
+    <section>
+      <h3>
+        {t("画布中的文件")}{" "}
+        <span className="h3-sub">{rows.length ? t("{n} 个 · {size}", { n: rows.length, size: formatBytes(total) }) : ""}</span>
+      </h3>
+      {rows.length === 0 ? (
+        <p className="hint">{t("把文件或图片拖进画布后，会列在这里。")}</p>
+      ) : (
+        <ul className="file-list">
+          {rows.map(({ asset, elementIds }) => (
+            <li key={asset.id}>
+              <button
+                title={`${asset.name}\n${t("单击定位 · 双击打开 · 右键更多")}`}
+                onClick={() => useCanvasStore.getState().requestFocus(elementIds[0])}
+                onDoubleClick={() => void backend.openAsset(asset)}
+                onContextMenu={(e) =>
+                  openContextMenu(e, [
+                    { label: t("在画布中定位"), icon: <LocateFixed size={15} />, onSelect: () => useCanvasStore.getState().requestFocus(elementIds[0]) },
+                    "separator",
+                    ...assetEntries(asset),
+                  ])
+                }
+              >
+                {isImageMime(asset.mime) && backend.assetUrl(asset) ? (
+                  <img className="file-list-thumb" src={backend.assetUrl(asset)} alt="" loading="lazy" />
+                ) : (
+                  <img className="file-list-icon" src={fileIconUrl(asset.name)} alt="" />
+                )}
+                <span className="file-list-name">{asset.name}</span>
+                <span className="file-list-size">{formatBytes(asset.size)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 export function Inspector({ meta }: { meta: CanvasMeta }) {
+  const t = useT();
   const doc = useCanvasStore((s) => s.doc);
   const selectedIds = useCanvasStore((s) => s.selectedIds);
   const selectedEdgeId = useCanvasStore((s) => s.selectedEdgeId);
@@ -26,80 +93,85 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
     <aside className="inspector">
       {selected.length === 0 && !selectedEdgeId && (
         <section>
-          <h3>画布</h3>
+          <h3>{t("画布")}</h3>
           <dl className="props">
-            <dt>所属项目</dt>
-            <dd>{projects.find((p) => p.id === meta.projectId)?.name}</dd>
-            <dt>元素</dt>
-            <dd>{doc.elements.length} 个</dd>
-            <dt>连线</dt>
-            <dd>{doc.edges.length} 条</dd>
-            <dt>创建于</dt>
+            <dt>{t("所属项目")}</dt>
+            <dd>{(() => {
+              const p = projects.find((x) => x.id === meta.projectId);
+              return p ? projectLabel(p) : "";
+            })()}</dd>
+            <dt>{t("元素")}</dt>
+            <dd>{t("{n} 个", { n: doc.elements.length })}</dd>
+            <dt>{t("连线")}</dt>
+            <dd>{t("{n} 条", { n: doc.edges.length })}</dd>
+            <dt>{t("创建于")}</dt>
             <dd>{formatRelative(meta.createdAt)}</dd>
-            <dt>最后编辑</dt>
+            <dt>{t("最后编辑")}</dt>
             <dd>{formatRelative(meta.updatedAt)}</dd>
           </dl>
-          <p className="hint">选中卡片后，这里显示它的属性。</p>
+          <p className="hint">{t("选中卡片后，这里显示它的属性。")}</p>
         </section>
       )}
 
+      {selected.length === 0 && !selectedEdgeId && <CanvasFileList />}
+
       {selectedEdgeId && (
         <section>
-          <h3>连线</h3>
-          <p className="hint">按 Delete 删除这条连线。</p>
+          <h3>{t("连线")}</h3>
+          <p className="hint">{t("按 Delete 删除这条连线。")}</p>
         </section>
       )}
 
       {selected.length === 1 && (
         <section>
-          <h3>{TYPE_LABEL[selected[0].type]}</h3>
+          <h3>{t(TYPE_LABEL[selected[0].type])}</h3>
           <dl className="props">
-            <dt>尺寸</dt>
+            <dt>{t("尺寸")}</dt>
             <dd>
               {Math.round(selected[0].width)} × {Math.round(selected[0].height)}
             </dd>
-            <dt>创建于</dt>
+            <dt>{t("创建于")}</dt>
             <dd>{formatRelative(selected[0].createdAt)}</dd>
-            <dt>修改于</dt>
+            <dt>{t("修改于")}</dt>
             <dd>{formatRelative(selected[0].updatedAt)}</dd>
           </dl>
           {(selected[0].type === "image" || selected[0].type === "file") &&
             (() => {
               const asset = assets.get(selected[0].assetId);
-              if (!asset) return <p className="hint">找不到对应的文件。</p>;
+              if (!asset) return <p className="hint">{t("找不到对应的文件。")}</p>;
               return (
                 <>
-                  <h3>文件</h3>
+                  <h3>{t("文件")}</h3>
                   <dl className="props">
-                    <dt>名称</dt>
+                    <dt>{t("名称")}</dt>
                     <dd className="break">{asset.name}</dd>
-                    <dt>大小</dt>
+                    <dt>{t("大小")}</dt>
                     <dd>{formatBytes(asset.size)}</dd>
                     {asset.width && (
                       <>
-                        <dt>像素</dt>
+                        <dt>{t("像素")}</dt>
                         <dd>
                           {asset.width} × {asset.height}
                         </dd>
                       </>
                     )}
-                    <dt>位置</dt>
+                    <dt>{t("位置")}</dt>
                     <dd className="break mono">{asset.path}</dd>
-                    <dt>引用</dt>
-                    <dd>{asset.refCount} 个画布</dd>
+                    <dt>{t("引用")}</dt>
+                    <dd>{t("{n} 个画布", { n: asset.refCount })}</dd>
                   </dl>
                   <button className="btn" onClick={() => void backend.openAsset(asset)}>
-                    <ExternalLink size={14} /> 用默认程序打开
+                    <ExternalLink size={14} /> {t("用默认程序打开")}
                   </button>
                   {selected[0].type === "image" && isOcrMime(asset.mime) && asset.ocrText !== undefined && (
                     <>
-                      <h3 className="spaced">图中文字</h3>
+                      <h3 className="spaced">{t("图中文字")}</h3>
                       {asset.ocrText === null ? (
-                        <p className="hint">正在识别…</p>
+                        <p className="hint">{t("正在识别…")}</p>
                       ) : asset.ocrText ? (
                         <pre className="ocr-text">{asset.ocrText}</pre>
                       ) : (
-                        <p className="hint">没有识别到文字。</p>
+                        <p className="hint">{t("没有识别到文字。")}</p>
                       )}
                     </>
                   )}
@@ -111,14 +183,14 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
 
       {selected.length > 1 && (
         <section>
-          <h3>已选 {selected.length} 个元素</h3>
-          <p className="hint">Ctrl+G 放进分组框，Delete 删除。</p>
+          <h3>{t("已选 {n} 个元素", { n: selected.length })}</h3>
+          <p className="hint">{t("Ctrl+G 放进分组框，Delete 删除。")}</p>
         </section>
       )}
 
       {colorable.length > 0 && (
         <section>
-          <h3>颜色</h3>
+          <h3>{t("颜色")}</h3>
           <div className="swatches">
             {CARD_COLORS.map((c) => (
               <button

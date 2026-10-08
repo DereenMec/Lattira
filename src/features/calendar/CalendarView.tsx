@@ -1,16 +1,21 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { monthGrid, toLocalDate } from "@/lib/date";
+import { fullDate, monthDay, monthGrid, toLocalDate, yearMonth } from "@/lib/date";
+import { msg, useT } from "@/i18n";
 import { consumeDragClick, startCanvasDrag } from "@/features/layout/canvasDrag";
+import { openContextMenu } from "@/features/menu/ContextMenu";
+import { ProjectIcon } from "@/features/project/projectIcons";
+import { canvasMenu } from "@/features/menu/menus";
 import { backend } from "@/services/backend";
-import { useAppStore } from "@/store/appStore";
+import { projectLabel, useAppStore } from "@/store/appStore";
 import type { CanvasDay, LocalDate } from "@/types/model";
 
-const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
+const WEEKDAYS = [msg("一"), msg("二"), msg("三"), msg("四"), msg("五"), msg("六"), msg("日")];
 const MAX_CHIPS = 3;
 
 /** 工作日志式日历：画布出现在它被编辑过的每一天 */
 export function CalendarView() {
+  const t = useT();
   const canvases = useAppStore((s) => s.canvases);
   const projects = useAppStore((s) => s.projects);
   const navigate = useAppStore((s) => s.navigate);
@@ -32,7 +37,7 @@ export function CalendarView() {
     backend
       .calendarDays(from, to)
       .then((d) => alive && setDays(d))
-      .catch((e) => useAppStore.getState().showToast(`读取日历失败：${String(e)}`));
+      .catch((e) => useAppStore.getState().showToast(t("读取日历失败：{error}", { error: String(e) })));
     return () => {
       alive = false;
     };
@@ -72,16 +77,16 @@ export function CalendarView() {
     <div className="page calendar-page">
       <header className="page-head">
         <h1>
-          {cursor.year}年{cursor.month + 1}月
+          {yearMonth(cursor.year, cursor.month)}
         </h1>
         <div className="page-actions">
-          <button className="icon-btn" onClick={() => shift(-1)} title="上个月">
+          <button className="icon-btn" onClick={() => shift(-1)} title={t("上个月")}>
             <ChevronLeft size={16} />
           </button>
           <button className="btn ghost" onClick={goToday}>
-            今天
+            {t("今天")}
           </button>
-          <button className="icon-btn" onClick={() => shift(1)} title="下个月">
+          <button className="icon-btn" onClick={() => shift(1)} title={t("下个月")}>
             <ChevronRight size={16} />
           </button>
         </div>
@@ -91,7 +96,7 @@ export function CalendarView() {
         <div className="month">
           {WEEKDAYS.map((w) => (
             <div key={w} className="weekday">
-              {w}
+              {t(w)}
             </div>
           ))}
           {grid.map((date) => {
@@ -122,10 +127,10 @@ export function CalendarView() {
 
         <aside className="day-panel">
           <h2>
-            {sm}月{sd}日{sy !== cursor.year ? `（${sy}）` : ""}
+            {sy !== cursor.year ? fullDate(new Date(sy, sm - 1, sd)) : monthDay(new Date(sy, sm - 1, sd))}
           </h2>
           {selectedList.length === 0 ? (
-            <p className="hint">这一天没有编辑过画布。</p>
+            <p className="hint">{t("这一天没有编辑过画布。")}</p>
           ) : (
             <ul className="day-list">
               {selectedList.map((d) => {
@@ -135,12 +140,13 @@ export function CalendarView() {
                   <li key={d.canvasId}>
                     <button
                       onPointerDown={(e) => startCanvasDrag(e, c)}
+                      onContextMenu={(e) => openContextMenu(e, canvasMenu(c))}
                       onClick={() => !consumeDragClick() && navigate({ kind: "canvas", canvasId: c.id })}
                     >
-                      <span className="dot" style={{ background: p?.color }} />
+                      {p ? <ProjectIcon project={p} size={13} /> : <span />}
                       <span className="day-list-title">{c.title}</span>
                       <span className="day-list-meta">
-                        {p?.name} · {d.changeCount} 处变化
+                        {p ? projectLabel(p) : ""} · {t("{n} 处变化", { n: d.changeCount })}
                       </span>
                     </button>
                   </li>
