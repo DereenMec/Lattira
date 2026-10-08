@@ -4,12 +4,14 @@ import {
   ArrowLeftRight,
   BoxSelect,
   ClipboardPaste,
-  Group,
+  Folder,
+  FolderInput,
+  FolderOpen,
+  FolderPlus,
   Map as MapIcon,
   Maximize,
   Minus,
   Paperclip,
-  FolderPlus,
   Plus,
   Redo2,
   StickyNote,
@@ -50,7 +52,7 @@ import { ElementView, type ElementHandlers } from "./ElementView";
 import { copySelection, pasteIntoCanvas } from "./clipboard";
 import { FindBar, findMatches } from "./FindBar";
 import { Minimap } from "./Minimap";
-import { assetsInTree, elementsForAssets, elementsForTree, newTextCard } from "./placement";
+import { assetsInTree, elementsForAssets, elementsForTree, newFolder, newTextCard } from "./placement";
 
 type Gesture =
   | { kind: "pan"; start: Point; vp: Viewport }
@@ -611,8 +613,10 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         hint: t("双击"),
         onSelect: () => canvas().addElements([newTextCard(at)], { edit: true }),
       },
+      { label: t("在此新建空文件夹"), icon: <FolderPlus size={15} />, onSelect: () => canvas().addElements([newFolder(at)], { edit: true }) },
+      "separator",
       { label: t("在此插入文件…"), icon: <Paperclip size={15} />, onSelect: () => void pickFiles(at) },
-      { label: t("在此插入文件夹…"), icon: <FolderPlus size={15} />, onSelect: () => void pickFiles(at, true) },
+      { label: t("从电脑导入文件夹…"), icon: <FolderOpen size={15} />, onSelect: () => void pickFiles(at, true) },
       {
         label: t("粘贴"),
         icon: <ClipboardPaste size={15} />,
@@ -803,6 +807,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         onAddText={() => canvas().addElements([newTextCard(viewCenterWorld())], { edit: true })}
         onAddFiles={() => void pickFiles()}
         onAddFolder={() => void pickFiles(undefined, true)}
+        onNewFolder={() => canvas().addElements([newFolder(viewCenterWorld())], { edit: true })}
         onGroup={() => canvas().groupSelection()}
         onZoom={zoomBy}
         onFit={fitAll}
@@ -816,6 +821,7 @@ function Toolbar(props: {
   onAddText(): void;
   onAddFiles(): void;
   onAddFolder(): void;
+  onNewFolder(): void;
   onGroup(): void;
   onZoom(factor: number): void;
   onFit(): void;
@@ -837,13 +843,26 @@ function Toolbar(props: {
         <Paperclip size={16} />
         <span>{t("文件")}</span>
       </button>
-      <button className="tb-btn" onClick={props.onAddFolder} title={t("插入文件夹（变成一个分组）")}>
-        <FolderPlus size={16} />
+      <button
+        className="tb-btn"
+        title={t("文件夹：新建、放入选中的卡片，或从电脑导入")}
+        onClick={(e) =>
+          openContextMenu(e, [
+            {
+              label: t("把选中的卡片放进文件夹"),
+              icon: <FolderInput size={15} />,
+              hint: "Ctrl+G",
+              disabled: !hasSelection,
+              onSelect: props.onGroup,
+            },
+            { label: t("新建空文件夹"), icon: <FolderPlus size={15} />, onSelect: props.onNewFolder },
+            "separator",
+            { label: t("从电脑导入文件夹…"), icon: <FolderOpen size={15} />, onSelect: props.onAddFolder },
+          ])
+        }
+      >
+        <Folder size={16} />
         <span>{t("文件夹")}</span>
-      </button>
-      <button className="tb-btn" onClick={props.onGroup} disabled={!hasSelection} title={t("把选中的卡片放进分组框（Ctrl+G）")}>
-        <Group size={16} />
-        <span>{t("分组")}</span>
       </button>
       <span className="tb-sep" />
       <button className="tb-icon" onClick={() => canvas().undo()} disabled={!canUndo} title={t("撤销（Ctrl+Z）")}>

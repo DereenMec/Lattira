@@ -98,7 +98,7 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matc
           {editing ? (
             <TextEditor initial={el.label} onDone={(v) => handlers.onFinishEdit(el.id, v)} />
           ) : (
-            el.label || t("未命名分组")
+            el.label || t("未命名文件夹")
           )}
         </div>
       )}

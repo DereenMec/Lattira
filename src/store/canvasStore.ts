@@ -376,7 +376,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       const section: SectionElement = {
         id: uuidv7(),
         type: "section",
-        label: t("新分组"),
+        label: t("新文件夹"),
         x: b.x - pad,
         y: b.y - pad - 24,
         width: b.width + pad * 2,

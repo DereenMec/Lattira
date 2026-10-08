@@ -118,8 +118,8 @@ export const en: Record<string, string> = {
     "Welcome to Lattira\n\nThis is a canvas. Material lives here as cards — where they sit, how they're grouped and connected is information too.",
   "新建卡片\n\n双击空白处新建文本卡片。把文件或图片拖进窗口，它们会被复制进工作区。":
     "Create cards\n\nDouble-click empty space for a text card. Drag files or images into the window — they're copied into the workspace.",
-  "整理\n\n拖动卡片调整位置。Shift+点击多选，或在空白处拖出选框；Ctrl+G 把选中的卡片放进分组框。":
-    "Organize\n\nDrag cards around. Shift+click or drag a box to select several; Ctrl+G puts them in a group.",
+  "整理\n\n拖动卡片调整位置。Shift+点击多选，或在空白处拖出选框；Ctrl+G 把选中的卡片放进文件夹。":
+    "Organize\n\nDrag cards around. Shift+click or drag a box to select several; Ctrl+G puts them in a folder.",
   "连线\n\n选中一张卡片，拖动它右侧的小圆点到另一张卡片上。":
     "Connect\n\nSelect a card and drag the dot on its right edge onto another card.",
   "移动画布\n\n滚轮平移，Ctrl+滚轮缩放，按住空格拖动也能平移。Shift+1 显示全部内容。":
@@ -217,10 +217,17 @@ export const en: Record<string, string> = {
   "无法打开文件：{error}": "Could not open file: {error}",
   "在此新建文本卡片": "New text card here",
   "在此插入文件…": "Insert files here…",
-  "在此插入文件夹…": "Insert folder here…",
   "选择要放到画布上的文件夹": "Choose folders to add to the canvas",
-  "插入文件夹（变成一个分组）": "Insert a folder (becomes a group)",
-  "导入文件夹：文件夹变成分组，里面的文件自动排好": "Import folders: each folder becomes a group with its files neatly arranged",
+  "导入文件夹：画布上出现同名文件夹，里面的文件自动排好":
+    "Import folders: each one appears as a folder on the canvas with its files neatly arranged",
+  "「分组」与「文件夹」合并：画布上的分组统一叫文件夹，工具栏的文件夹按钮可新建、放入选中卡片或从电脑导入":
+    "Groups and folders are now one thing: the toolbar Folder button creates a folder, puts selected cards in one, or imports one from your computer",
+  "修复窗口较窄时工具栏文字被挤成竖排": "Fixed toolbar labels wrapping vertically in narrow windows",
+  "文件夹：新建、放入选中的卡片，或从电脑导入": "Folder: create one, put selected cards in one, or import from your computer",
+  "把选中的卡片放进文件夹": "Put selected cards in a folder",
+  "新建空文件夹": "New empty folder",
+  "在此新建空文件夹": "New empty folder here",
+  "从电脑导入文件夹…": "Import folder from computer…",
   "全选": "Select all",
   "显示全部内容": "Show everything",
   "隐藏小地图": "Hide minimap",
@@ -231,8 +238,6 @@ export const en: Record<string, string> = {
   "或把文件、图片拖进来": "or drag files and images in",
   "新建文本卡片（T）": "New text card (T)",
   "插入文件或图片": "Insert files or images",
-  "把选中的卡片放进分组框（Ctrl+G）": "Group selected cards (Ctrl+G)",
-  "分组": "Group",
   "撤销（Ctrl+Z）": "Undo (Ctrl+Z)",
   "重做（Ctrl+Shift+Z）": "Redo (Ctrl+Shift+Z)",
   "缩小（Ctrl+-）": "Zoom out (Ctrl+-)",
@@ -244,8 +249,8 @@ export const en: Record<string, string> = {
   "空白卡片": "Empty card",
   "图片不可用": "Image unavailable",
   "文件不可用": "File unavailable",
-  "未命名分组": "Untitled group",
-  "新分组": "New group",
+  "未命名文件夹": "Untitled folder",
+  "新文件夹": "New folder",
   "拖动调整大小": "Drag to resize",
   "拖到另一张卡片上连线": "Drag onto another card to connect",
   "在此画布中查找（含图片中的文字）": "Find in this canvas (including text in images)",
@@ -260,7 +265,6 @@ export const en: Record<string, string> = {
 
   // ---- 检查器 ----
   "文本卡片": "Text card",
-  "分组框": "Group",
   "画布中的文件": "Files on this canvas",
   "{n} 个 · {size}": "{n} · {size}",
   "把文件或图片拖进画布后，会列在这里。": "Files and images you drag onto the canvas will be listed here.",
@@ -283,7 +287,7 @@ export const en: Record<string, string> = {
   "正在识别…": "Recognizing…",
   "没有识别到文字。": "No text found.",
   "已选 {n} 个元素": "{n} items selected",
-  "Ctrl+G 放进分组框，Delete 删除。": "Ctrl+G to group, Delete to remove.",
+  "Ctrl+G 放进文件夹，Delete 删除。": "Ctrl+G to put in a folder, Delete to remove.",
 
   // ---- 右键菜单 ----
   "已复制{what}": "Copied {what}",
@@ -311,10 +315,10 @@ export const en: Record<string, string> = {
   "置于底层": "Send to back",
   "复制文字": "Copy text",
   "双击标题": "Double-click title",
-  "取消分组（保留卡片）": "Ungroup (keep cards)",
-  "删除分组和其中的 {n} 张卡片": "Delete group and its {n} cards",
+  "解散文件夹（保留卡片）": "Dissolve folder (keep cards)",
+  "删除文件夹和其中的 {n} 张卡片": "Delete folder and its {n} cards",
   "从画布移除": "Remove from canvas",
-  "放进分组框": "Group",
+  "放进文件夹": "Put in a folder",
   "对齐": "Align",
   "等距分布": "Distribute",
   "水平等距": "Distribute horizontally",

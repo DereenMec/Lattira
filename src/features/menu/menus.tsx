@@ -17,7 +17,7 @@ import {
   FilePlus,
   FolderInput,
   FolderOpen,
-  Group,
+  FolderPlus,
   Image as ImageIcon,
   Link,
   Pencil,
@@ -205,10 +205,10 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
         { label: t("重命名"), icon: <Pencil size={S} />, hint: t("双击标题"), onSelect: () => cv().setEditing(el.id) },
         colorEntry(setColor([el]), el.color),
         "separator",
-        { label: t("取消分组（保留卡片）"), icon: <Ungroup size={S} />, onSelect: () => cv().ungroup(el.id) },
+        { label: t("解散文件夹（保留卡片）"), icon: <Ungroup size={S} />, onSelect: () => cv().ungroup(el.id) },
         "separator",
         {
-          label: t("删除分组和其中的 {n} 张卡片", { n: inside.length }),
+          label: t("删除文件夹和其中的 {n} 张卡片", { n: inside.length }),
           icon: <Trash2 size={S} />,
           danger: true,
           onSelect: () => removeElements([el.id, ...inside.map((o) => o.id)]),
@@ -228,7 +228,7 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
   const colorable = els.filter((e) => e.type === "text" || e.type === "section");
   const align = alignOptions();
   return [
-    { label: t("放进分组框"), icon: <Group size={S} />, hint: "Ctrl+G", onSelect: () => cv().groupSelection() },
+    { label: t("放进文件夹"), icon: <FolderPlus size={S} />, hint: "Ctrl+G", onSelect: () => cv().groupSelection() },
     {
       label: t("对齐"),
       icon: <AlignStartVertical size={S} />,

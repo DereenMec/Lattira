@@ -11,7 +11,7 @@ import { projectLabel, useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
 import { CARD_COLORS, type Asset, type CanvasMeta, type CardColor, type ID } from "@/types/model";
 
-const TYPE_LABEL = { text: msg("文本卡片"), image: msg("图片"), file: msg("文件"), section: msg("分组框") } as const;
+const TYPE_LABEL = { text: msg("文本卡片"), image: msg("图片"), file: msg("文件"), section: msg("文件夹") } as const;
 
 /** 当前画布引用的全部文件与图片；单击定位到卡片，双击打开，右键更多操作 */
 function CanvasFileList() {
@@ -184,7 +184,7 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
       {selected.length > 1 && (
         <section>
           <h3>{t("已选 {n} 个元素", { n: selected.length })}</h3>
-          <p className="hint">{t("Ctrl+G 放进分组框，Delete 删除。")}</p>
+          <p className="hint">{t("Ctrl+G 放进文件夹，Delete 删除。")}</p>
         </section>
       )}
 

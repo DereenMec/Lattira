@@ -1,7 +1,8 @@
 import type { Point } from "@/lib/geometry";
 import { uuidv7 } from "@/lib/id";
 import { isImageMime } from "@/lib/format";
-import type { Asset, CanvasElement, ImportNode, TextElement } from "@/types/model";
+import { t } from "@/i18n";
+import type { Asset, CanvasElement, ImportNode, SectionElement, TextElement } from "@/types/model";
 
 const GAP = 24;
 const MAX_IMAGE_WIDTH = 360;
@@ -199,6 +200,24 @@ export function elementsForTree(nodes: ImportNode[], at: Point): CanvasElement[]
 /** 导入结果中的全部资源 */
 export function assetsInTree(nodes: ImportNode[]): Asset[] {
   return nodes.flatMap((n) => (n.kind === "file" ? [n.asset] : assetsInTree(n.children)));
+}
+
+/** 画布上的空文件夹（分组框），以 at 为中心；之后可以把卡片拖进去 */
+export function newFolder(at: Point): SectionElement {
+  const now = Date.now();
+  const width = 560;
+  const height = 360;
+  return {
+    id: uuidv7(),
+    type: "section",
+    label: t("新文件夹"),
+    x: at.x - width / 2,
+    y: at.y - height / 2,
+    width,
+    height,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 export function newTextCard(at: Point, text = ""): TextElement {

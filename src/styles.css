@@ -2024,3 +2024,13 @@ body.is-dragging-canvas * {
   color: var(--ink-3);
   letter-spacing: 0.02em;
 }
+
+/* 工具栏按钮文字不换行（窄窗口下曾被挤成竖排） */
+.tb-btn,
+.tb-btn span {
+  white-space: nowrap;
+  flex: none;
+}
+.canvas-toolbar {
+  max-width: calc(100% - 24px);
+}
