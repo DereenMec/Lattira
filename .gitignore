@@ -13,3 +13,6 @@ src-tauri/gen/schemas/
 .idea/
 .DS_Store
 Thumbs.db
+
+# TypeScript 增量编译缓存
+*.tsbuildinfo

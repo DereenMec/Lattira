@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Asset, CanvasDay, CanvasMeta, Project, SearchHit, WorkspaceInfo } from "@/types/model";
 import type { Backend } from "./backend";
@@ -45,6 +46,18 @@ export function createTauriBackend(): Backend {
     listAssets: () => invoke<Asset[]>("list_assets"),
     assetUrl: (asset) => convertFileSrc(`${root}\\${asset.path.replaceAll("/", "\\")}`),
     openAsset: (asset) => invoke<void>("open_asset", { id: asset.id }),
+    subscribeAssetUpdates(onUpdate) {
+      let stop: (() => void) | undefined;
+      let cancelled = false;
+      void listen<string>("asset-updated", (e) => onUpdate(e.payload)).then((fn) => {
+        if (cancelled) fn();
+        else stop = fn;
+      });
+      return () => {
+        cancelled = true;
+        stop?.();
+      };
+    },
 
     calendarDays: (from, to) => invoke<CanvasDay[]>("calendar_days", { from, to }),
     search: (query) => invoke<SearchHit[]>("search", { query }),

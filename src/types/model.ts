@@ -20,7 +20,7 @@ export interface Project {
   id: ID;
   name: string;
   color: string;
-  /** 系统自带的「收件箱」项目，不可删除、不可重命名 */
+  /** 系统自带的「未分类」项目，不可删除、不可重命名 */
   isInbox: boolean;
   pinned: boolean;
   archived: boolean;
@@ -35,6 +35,8 @@ export interface CanvasMeta {
   elementCount: number;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  /** 缩略图数据，见 lib/preview.ts；尚未生成时为空 */
+  preview?: string | null;
 }
 
 export type ElementType = "text" | "image" | "file" | "section";
@@ -111,6 +113,8 @@ export interface Asset {
   width?: number;
   height?: number;
   importedAt: Timestamp;
+  /** 图片中识别出的文字；null 表示尚未识别 */
+  ocrText?: string | null;
   /** 引用该资源的画布数 */
   refCount: number;
 }
@@ -127,6 +131,7 @@ export interface CanvasIndex {
   elementCount: number;
   texts: { elementId: ID; text: string }[];
   assetIds: ID[];
+  preview: string;
 }
 
 /** 日历的一条记录：某画布在某天被编辑过，以及当天累计的变化量 */
@@ -136,14 +141,16 @@ export interface CanvasDay {
   changeCount: number;
 }
 
-export type SearchHitKind = "canvas" | "text" | "file";
+export type SearchHitKind = "canvas" | "text" | "file" | "image";
 
 export interface SearchHit {
   kind: SearchHitKind;
   canvasId: ID;
   canvasTitle: string;
   projectId: ID;
-  elementId?: ID;
+  elementId?: ID | null;
+  /** 命中文件或图片时，用来在画布上找到对应卡片 */
+  assetId?: ID | null;
   snippet: string;
 }
 

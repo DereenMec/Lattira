@@ -1,5 +1,6 @@
-import { PanelRight, Trash2 } from "lucide-react";
+import { GripVertical, PanelRight, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { startCanvasDrag } from "@/features/layout/canvasDrag";
 import { confirmAction } from "@/services/confirm";
 import { useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
@@ -9,7 +10,7 @@ import { Inspector } from "./Inspector";
 
 const SAVE_LABEL = { saved: "已保存", pending: "编辑中…", saving: "保存中…", error: "保存失败" } as const;
 
-export function CanvasPage({ canvasId, focusElementId }: { canvasId: ID; focusElementId?: ID }) {
+export function CanvasPage({ canvasId, focusElementId, focusAssetId }: { canvasId: ID; focusElementId?: ID; focusAssetId?: ID }) {
   const meta = useAppStore((s) => s.canvases.find((c) => c.id === canvasId));
   const projects = useAppStore((s) => s.projects);
   const inspectorOpen = useAppStore((s) => s.inspectorOpen);
@@ -36,6 +37,9 @@ export function CanvasPage({ canvasId, focusElementId }: { canvasId: ID; focusEl
   return (
     <div className="page canvas-page">
       <header className="topbar">
+        <span className="drag-handle" onPointerDown={(e) => startCanvasDrag(e, meta)} title="拖到左侧项目上可移动这个画布">
+          <GripVertical size={16} />
+        </span>
         <button className="crumb" onClick={() => navigate({ kind: "project", projectId: meta.projectId })}>
           {project?.name}
         </button>
@@ -83,7 +87,7 @@ export function CanvasPage({ canvasId, focusElementId }: { canvasId: ID; focusEl
         </div>
       </header>
       <div className="canvas-body">
-        <CanvasView canvasId={canvasId} focusElementId={focusElementId} />
+        <CanvasView canvasId={canvasId} focusElementId={focusElementId} focusAssetId={focusAssetId} />
         {inspectorOpen && <Inspector meta={meta} />}
       </div>
     </div>

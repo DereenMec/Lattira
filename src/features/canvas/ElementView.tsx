@@ -18,12 +18,14 @@ interface Props {
   showHandles: boolean;
   editing: boolean;
   highlighted: boolean;
+  /** 缩得很小时只画首行文字，减少排版开销 */
+  lod: boolean;
   asset?: Asset;
   assetUrl?: string;
   handlers: ElementHandlers;
 }
 
-function ElementViewImpl({ el, selected, showHandles, editing, highlighted, asset, assetUrl, handlers }: Props) {
+function ElementViewImpl({ el, selected, showHandles, editing, highlighted, lod, asset, assetUrl, handlers }: Props) {
   const isSection = el.type === "section";
   const className = [
     "el",
@@ -32,6 +34,7 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, asse
     selected ? "is-selected" : "",
     editing ? "is-editing" : "",
     highlighted ? "is-highlighted" : "",
+    lod ? "is-lod" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -47,13 +50,15 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, asse
       {el.type === "text" &&
         (editing ? (
           <TextEditor initial={el.text} multiline onDone={(v) => handlers.onFinishEdit(el.id, v)} />
+        ) : lod ? (
+          <div className="el-text-lod">{firstLine(el.text)}</div>
         ) : (
           <div className="el-text-body">{el.text || <span className="placeholder">空白卡片</span>}</div>
         ))}
 
       {el.type === "image" &&
         (assetUrl ? (
-          <img className="el-image-body" src={assetUrl} alt={asset?.name ?? ""} draggable={false} />
+          <img className="el-image-body" src={assetUrl} alt={asset?.name ?? ""} draggable={false} decoding="async" />
         ) : (
           <div className="el-missing">
             <ImageOff size={20} />
@@ -100,6 +105,8 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, asse
 }
 
 export const ElementView = memo(ElementViewImpl);
+
+const firstLine = (s: string) => s.split("\n").find((l) => l.trim()) ?? "";
 
 function TextEditor({ initial, multiline, onDone }: { initial: string; multiline?: boolean; onDone(value: string): void }) {
   const [value, setValue] = useState(initial);

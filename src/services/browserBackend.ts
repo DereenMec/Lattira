@@ -33,6 +33,8 @@ function load(): State {
 
 export function createBrowserBackend(): Backend {
   const state = load();
+  // 早期版本叫「收件箱」
+  for (const p of state.projects) if (p.isInbox && p.name === "收件箱") p.name = "未分类";
   const blobUrls = new Map<ID, string>();
 
   const persist = () => {
@@ -81,7 +83,7 @@ export function createBrowserBackend(): Backend {
       if (!state.projects.some((p) => p.isInbox)) {
         state.projects.push({
           id: uuidv7(),
-          name: "收件箱",
+          name: "未分类",
           color: PROJECT_COLORS[0],
           isInbox: true,
           pinned: false,
@@ -144,12 +146,13 @@ export function createBrowserBackend(): Backend {
       const c = findCanvas(id);
       const now = Date.now();
       localStorage.setItem(contentKey(id), content);
-      c.updatedAt = now;
       c.elementCount = index.elementCount;
+      c.preview = index.preview;
       state.texts[id] = index.texts;
       state.assetRefs[id] = index.assetIds;
       const count = changes.added + changes.modified + changes.removed;
       if (count > 0) {
+        c.updatedAt = now;
         const date = toLocalDate(new Date(now));
         const day = state.days.find((d) => d.canvasId === id && d.date === date);
         if (day) day.changeCount += count;
@@ -200,6 +203,10 @@ export function createBrowserBackend(): Backend {
     async openAsset(asset) {
       const url = blobUrls.get(asset.id);
       if (url) window.open(url, "_blank");
+    },
+
+    subscribeAssetUpdates() {
+      return () => {};
     },
 
     async calendarDays(from, to) {

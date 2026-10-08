@@ -14,6 +14,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::error::{Error, Result};
 use crate::files;
+use crate::ocr;
 use crate::workspace::{self, new_id, now_ms, AppState, Workspace, WorkspaceInfo};
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,8 @@ pub struct CanvasMeta {
     element_count: i64,
     created_at: i64,
     updated_at: i64,
+    /// 缩略图用的精简布局（JSON 字符串），由前端在保存时生成
+    preview: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +75,8 @@ pub struct Asset {
     width: Option<i64>,
     height: Option<i64>,
     imported_at: i64,
+    /// 图片中识别出的文字；None 表示尚未识别或不适用
+    ocr_text: Option<String>,
     ref_count: i64,
 }
 
@@ -88,6 +93,7 @@ pub struct CanvasIndex {
     element_count: i64,
     texts: Vec<IndexedText>,
     asset_ids: Vec<String>,
+    preview: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +119,8 @@ pub struct SearchHit {
     canvas_title: String,
     project_id: String,
     element_id: Option<String>,
+    /// 命中的是文件或图片时，前端据此在画布上找到对应卡片
+    asset_id: Option<String>,
     snippet: String,
 }
 
@@ -121,8 +129,8 @@ pub struct SearchHit {
 // ---------------------------------------------------------------------------
 
 const PROJECT_COLS: &str = "id, name, color, is_inbox, pinned, archived, created_at, updated_at";
-const CANVAS_COLS: &str = "id, project_id, title, element_count, created_at, updated_at";
-const ASSET_SELECT: &str = "SELECT a.id, a.hash, a.path, a.name, a.mime, a.size, a.width, a.height, a.imported_at,
+const CANVAS_COLS: &str = "id, project_id, title, element_count, created_at, updated_at, preview";
+const ASSET_SELECT: &str = "SELECT a.id, a.hash, a.path, a.name, a.mime, a.size, a.width, a.height, a.imported_at, a.ocr_text,
     (SELECT COUNT(*) FROM asset_refs r JOIN canvases c ON c.id = r.canvas_id
       WHERE r.asset_id = a.id AND c.deleted_at IS NULL)
   FROM assets a";
@@ -148,6 +156,7 @@ fn canvas_row(r: &Row) -> rusqlite::Result<CanvasMeta> {
         element_count: r.get(3)?,
         created_at: r.get(4)?,
         updated_at: r.get(5)?,
+        preview: r.get(6)?,
     })
 }
 
@@ -162,7 +171,8 @@ fn asset_row(r: &Row) -> rusqlite::Result<Asset> {
         width: r.get(6)?,
         height: r.get(7)?,
         imported_at: r.get(8)?,
-        ref_count: r.get(9)?,
+        ocr_text: r.get(9)?,
+        ref_count: r.get(10)?,
     })
 }
 
@@ -207,6 +217,8 @@ fn open_at(app: &AppHandle, state: &AppState, root: &Path) -> Result<WorkspaceIn
     // 允许前端通过 asset:// 协议读取工作区内的图片
     app.asset_protocol_scope().allow_directory(&ws.root, true)?;
     workspace::remember_workspace(app, &ws.root)?;
+    // 补做之前没识别完的图片
+    ocr::schedule(app.clone(), ws.root.clone());
     let info = ws.info(is_new);
     *state.ws.lock().map_err(|_| Error::Invalid("内部状态异常，请重启栖页".into()))? = Some(ws);
     Ok(info)
@@ -293,13 +305,7 @@ pub async fn update_project(state: State<'_, AppState>, id: String, patch: Proje
                 now_ms()
             ],
         )?;
-        if new_dir != old_dir {
-            let (old_prefix, new_prefix) = (format!("projects/{old_dir}/"), format!("projects/{new_dir}/"));
-            tx.execute(
-                "UPDATE canvases SET file = ?2 || substr(file, length(?1) + 1) WHERE project_id = ?3 AND file LIKE ?1 || '%'",
-                params![old_prefix, new_prefix, id],
-            )?;
-        }
+        workspace::rewrite_canvas_paths(&tx, &id, &old_dir, &new_dir)?;
         tx.commit()?;
         get_project(&ws.conn, &id)
     })
@@ -413,11 +419,12 @@ pub async fn save_canvas(
         let now = now_ms();
         let total = changes.added + changes.modified + changes.removed;
         let tx = ws.conn.transaction()?;
+        tx.execute(
+            "UPDATE canvases SET element_count = ?2, preview = ?3 WHERE id = ?1",
+            params![id, index.element_count, index.preview],
+        )?;
         if total > 0 {
-            tx.execute(
-                "UPDATE canvases SET element_count = ?2, updated_at = ?3 WHERE id = ?1",
-                params![id, index.element_count, now],
-            )?;
+            tx.execute("UPDATE canvases SET updated_at = ?2 WHERE id = ?1", params![id, now])?;
             tx.execute(
                 "INSERT INTO edit_events (id, canvas_id, at, added, modified, removed) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![new_id(), id, now, changes.added, changes.modified, changes.removed],
@@ -428,8 +435,6 @@ pub async fn save_canvas(
                  ON CONFLICT (canvas_id, date) DO UPDATE SET change_count = change_count + excluded.change_count",
                 params![id, today, total],
             )?;
-        } else {
-            tx.execute("UPDATE canvases SET element_count = ?2 WHERE id = ?1", params![id, index.element_count])?;
         }
 
         tx.execute("DELETE FROM element_text WHERE canvas_id = ?1", [&id])?;
@@ -515,22 +520,29 @@ fn import_file(ws: &Workspace, src: &Path) -> Result<Asset> {
 }
 
 #[tauri::command]
-pub async fn import_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<Asset>> {
-    state.with(|ws| paths.iter().map(|p| import_file(ws, Path::new(p))).collect())
+pub async fn import_paths(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<Asset>> {
+    let (assets, root) = state.with(|ws| {
+        let assets = paths.iter().map(|p| import_file(ws, Path::new(p))).collect::<Result<Vec<_>>>()?;
+        Ok((assets, ws.root.clone()))
+    })?;
+    ocr::schedule(app, root);
+    Ok(assets)
 }
 
 /// 导入剪贴板里的图片等内存数据
 #[tauri::command]
-pub async fn import_bytes(state: State<'_, AppState>, name: String, bytes: Vec<u8>) -> Result<Asset> {
-    state.with(|ws| {
+pub async fn import_bytes(app: AppHandle, state: State<'_, AppState>, name: String, bytes: Vec<u8>) -> Result<Asset> {
+    let (asset, root) = state.with(|ws| {
         let hash = hex(&Sha256::digest(&bytes));
         if let Some(existing) = get_asset(&ws.conn, "hash", &hash)? {
-            return Ok(existing);
+            return Ok((existing, ws.root.clone()));
         }
         let dest = asset_destination(ws, &name)?;
         files::write_atomic(&dest, &bytes)?;
-        register_asset(ws, &hash, &dest, &name)
-    })
+        Ok((register_asset(ws, &hash, &dest, &name)?, ws.root.clone()))
+    })?;
+    ocr::schedule(app, root);
+    Ok(asset)
 }
 
 #[tauri::command]
@@ -615,6 +627,7 @@ pub async fn search(state: State<'_, AppState>, query: String) -> Result<Vec<Sea
                 canvas_title: title,
                 project_id,
                 element_id: None,
+                asset_id: None,
             });
         }
 
@@ -634,20 +647,32 @@ pub async fn search(state: State<'_, AppState>, query: String) -> Result<Vec<Sea
                 canvas_title,
                 project_id,
                 element_id: Some(element_id),
+                asset_id: None,
             });
         }
 
-        let mut stmt = ws.conn.prepare(
-            "SELECT r.canvas_id, c.title, c.project_id, a.name FROM asset_refs r
-             JOIN assets a ON a.id = r.asset_id
-             JOIN canvases c ON c.id = r.canvas_id
-             WHERE c.deleted_at IS NULL AND a.name LIKE ?1 ESCAPE '\\' ORDER BY c.updated_at DESC LIMIT 20",
-        )?;
-        for row in stmt.query_map([&like], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
-        })? {
-            let (canvas_id, canvas_title, project_id, name) = row?;
-            hits.push(SearchHit { kind: "file", snippet: name, canvas_id, canvas_title, project_id, element_id: None });
+        // 文件名与图片中的文字：落在引用了该资源的每个画布上
+        for (kind, column) in [("file", "a.name"), ("image", "a.ocr_text")] {
+            let mut stmt = ws.conn.prepare(&format!(
+                "SELECT r.canvas_id, c.title, c.project_id, a.id, {column} FROM asset_refs r
+                 JOIN assets a ON a.id = r.asset_id
+                 JOIN canvases c ON c.id = r.canvas_id
+                 WHERE c.deleted_at IS NULL AND {column} LIKE ?1 ESCAPE '\\' ORDER BY c.updated_at DESC LIMIT 20"
+            ))?;
+            for row in stmt.query_map([&like], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
+            })? {
+                let (canvas_id, canvas_title, project_id, asset_id, text) = row?;
+                hits.push(SearchHit {
+                    kind,
+                    snippet: if kind == "image" { snippet(&text, &q) } else { text },
+                    canvas_id,
+                    canvas_title,
+                    project_id,
+                    element_id: None,
+                    asset_id: Some(asset_id),
+                });
+            }
         }
         Ok(hits)
     })
@@ -708,5 +733,44 @@ mod tests {
         let (_, is_new) = Workspace::open(&dir).unwrap();
         assert!(!is_new);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_inbox_is_renamed() {
+        let dir = std::env::temp_dir().join(format!("lattira-legacy-{}", new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        {
+            // 模拟早期版本创建的「收件箱」以及其中的一个画布
+            let (ws, _) = Workspace::open(&dir).unwrap();
+            let id: String = ws.conn.query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| r.get(0)).unwrap();
+            fs::rename(dir.join("projects/未分类"), dir.join("projects/收件箱")).unwrap();
+            fs::write(dir.join("projects/收件箱/笔记.canvas"), "{}").unwrap();
+            ws.conn.execute("UPDATE projects SET name = '收件箱', dir = '收件箱' WHERE id = ?1", [&id]).unwrap();
+            ws.conn
+                .execute(
+                    "INSERT INTO canvases (id, project_id, title, file, created_at, updated_at) VALUES ('c1', ?1, '笔记', 'projects/收件箱/笔记.canvas', 0, 0)",
+                    [&id],
+                )
+                .unwrap();
+        }
+        let (ws, _) = Workspace::open(&dir).unwrap();
+        let (name, pdir): (String, String) =
+            ws.conn.query_row("SELECT name, dir FROM projects WHERE is_inbox = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((name.as_str(), pdir.as_str()), ("未分类", "未分类"));
+        let file: String = ws.conn.query_row("SELECT file FROM canvases WHERE id = 'c1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(file, "projects/未分类/笔记.canvas");
+        assert!(ws.abs(&file).is_file());
+        drop(ws);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 需要真实图片：`$env:LATTIRA_OCR_SAMPLE="图片路径"; cargo test ocr_sample -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ocr_sample() {
+        let path = std::env::var("LATTIRA_OCR_SAMPLE").expect("设置 LATTIRA_OCR_SAMPLE");
+        let text = ocr::recognize(Path::new(&path)).unwrap();
+        println!("识别结果：\n{text}");
+        assert!(!text.trim().is_empty());
     }
 }

@@ -2,8 +2,10 @@ import { useEffect } from "react";
 import { AssetLibrary } from "@/features/assets/AssetLibrary";
 import { CalendarView } from "@/features/calendar/CalendarView";
 import { CanvasPage } from "@/features/canvas/CanvasPage";
+import { CanvasDragGhost } from "@/features/layout/canvasDrag";
 import { Sidebar } from "@/features/layout/Sidebar";
 import { ProjectView } from "@/features/project/ProjectView";
+import { RecentView } from "@/features/project/RecentView";
 import { SearchPalette } from "@/features/search/SearchPalette";
 import { WelcomeScreen } from "@/features/workspace/WelcomeScreen";
 import { useAppStore } from "@/store/appStore";
@@ -23,7 +25,7 @@ export function App() {
       const s = useAppStore.getState();
       if (s.status !== "ready" || !(e.ctrlKey || e.metaKey)) return;
       const key = e.key.toLowerCase();
-      if (key === "k") {
+      if (key === "e") {
         e.preventDefault();
         s.setSearchOpen(!s.searchOpen);
       } else if (key === "1" && !e.shiftKey) {
@@ -54,7 +56,10 @@ export function App() {
         <div className="shell">
           <Sidebar />
           <main className="main">
-            {view.kind === "canvas" && <CanvasPage canvasId={view.canvasId} focusElementId={view.focusElementId} />}
+            {view.kind === "canvas" && (
+              <CanvasPage canvasId={view.canvasId} focusElementId={view.focusElementId} focusAssetId={view.focusAssetId} />
+            )}
+            {view.kind === "recent" && <RecentView />}
             {view.kind === "project" && <ProjectView projectId={view.projectId} />}
             {view.kind === "calendar" && <CalendarView />}
             {view.kind === "assets" && <AssetLibrary />}
@@ -63,6 +68,7 @@ export function App() {
       )}
       {searchOpen && <SearchPalette />}
       {toast && <div className="toast">{toast}</div>}
+      <CanvasDragGhost />
     </>
   );
 }

@@ -25,6 +25,16 @@ chrono = "0.4"
 thiserror = "2"
 mime_guess = "2"
 imagesize = "0.15"
+windows = { version = "0.62", features = [
+  "Foundation",
+  "Foundation_Collections",
+  "Globalization",
+  "Graphics_Imaging",
+  "Media_Ocr",
+  "Storage",
+  "Storage_Streams",
+  "Win32_System_WinRT",
+] }
 
 [profile.release]
 codegen-units = 1

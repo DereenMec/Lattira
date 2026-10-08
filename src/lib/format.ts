@@ -16,3 +16,7 @@ export function fileExtension(name: string): string {
 }
 
 export const isImageMime = (mime: string) => mime.startsWith("image/");
+
+/** 与 src-tauri/src/ocr.rs 中的 OCR_MIMES 一致：这些格式的图片会做文字识别 */
+const OCR_MIMES = new Set(["image/png", "image/jpeg", "image/bmp", "image/gif", "image/tiff", "image/webp"]);
+export const isOcrMime = (mime: string) => OCR_MIMES.has(mime);

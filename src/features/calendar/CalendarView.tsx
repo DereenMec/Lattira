@@ -1,6 +1,7 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { monthGrid, toLocalDate } from "@/lib/date";
+import { consumeDragClick, startCanvasDrag } from "@/features/layout/canvasDrag";
 import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
 import type { CanvasDay, LocalDate } from "@/types/model";
@@ -132,7 +133,10 @@ export function CalendarView() {
                 const p = projects.find((x) => x.id === c.projectId);
                 return (
                   <li key={d.canvasId}>
-                    <button onClick={() => navigate({ kind: "canvas", canvasId: c.id })}>
+                    <button
+                      onPointerDown={(e) => startCanvasDrag(e, c)}
+                      onClick={() => !consumeDragClick() && navigate({ kind: "canvas", canvasId: c.id })}
+                    >
                       <span className="dot" style={{ background: p?.color }} />
                       <span className="day-list-title">{c.title}</span>
                       <span className="day-list-meta">

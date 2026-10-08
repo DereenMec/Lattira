@@ -77,11 +77,18 @@ CREATE TABLE canvas_days (
     PRIMARY KEY (canvas_id, date)
 );
 CREATE INDEX canvas_days_date ON canvas_days(date);
+"#, r#"
+-- 图片中识别出的文字；NULL 表示尚未识别，空串表示识别过但没有文字
+ALTER TABLE assets ADD COLUMN ocr_text TEXT;
+-- 画布缩略图数据（前端生成的精简布局 JSON）
+ALTER TABLE canvases ADD COLUMN preview TEXT;
 "#];
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // 后台 OCR 线程使用独立连接写库，遇到锁时等待而不是立即报错
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&mut conn)?;
     Ok(conn)

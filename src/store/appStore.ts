@@ -6,7 +6,8 @@ import { PROJECT_COLORS } from "@/types/model";
 
 export type View =
   | { kind: "project"; projectId: ID }
-  | { kind: "canvas"; canvasId: ID; focusElementId?: ID }
+  | { kind: "canvas"; canvasId: ID; focusElementId?: ID; focusAssetId?: ID }
+  | { kind: "recent" }
   | { kind: "calendar" }
   | { kind: "assets" };
 
@@ -19,6 +20,7 @@ interface AppState {
   view: View;
   searchOpen: boolean;
   inspectorOpen: boolean;
+  minimapOpen: boolean;
   toast: string | null;
 
   init(): Promise<void>;
@@ -26,6 +28,7 @@ interface AppState {
   navigate(view: View): void;
   setSearchOpen(open: boolean): void;
   toggleInspector(): void;
+  toggleMinimap(): void;
   showToast(message: string): void;
 
   createProject(name: string): Promise<Project>;
@@ -43,6 +46,25 @@ interface AppState {
 
 const toMap = (assets: Asset[]) => new Map(assets.map((a) => [a.id, a]));
 
+function readFlag(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeFlag(key: string, value: boolean) {
+  try {
+    localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // 存储不可用时只影响本次会话
+  }
+}
+
+let unsubscribeAssets: (() => void) | undefined;
+
 export const inboxOf = (projects: Project[]) => projects.find((p) => p.isInbox);
 
 export const useAppStore = create<AppState>()((set, get) => {
@@ -53,7 +75,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       backend.listAssets(),
     ]);
     const inbox = inboxOf(projects);
-    if (!inbox) throw new Error("工作区缺少收件箱项目");
+    if (!inbox) throw new Error("工作区缺少未分类项目");
 
     let all = canvases;
     if (ws.isNew && canvases.length === 0) {
@@ -70,6 +92,9 @@ export const useAppStore = create<AppState>()((set, get) => {
       status: "ready",
       view: latest ? { kind: "canvas", canvasId: latest.id } : { kind: "project", projectId: inbox.id },
     });
+    // 后台 OCR 识别完一张图片后刷新资源信息
+    unsubscribeAssets?.();
+    unsubscribeAssets = backend.subscribeAssetUpdates(() => void get().refreshAssets());
   }
 
   return {
@@ -81,6 +106,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     view: { kind: "calendar" },
     searchOpen: false,
     inspectorOpen: true,
+    minimapOpen: readFlag("lattira.minimap", true),
     toast: null,
 
     async init() {
@@ -106,6 +132,11 @@ export const useAppStore = create<AppState>()((set, get) => {
     navigate: (view) => set({ view }),
     setSearchOpen: (searchOpen) => set({ searchOpen }),
     toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
+    toggleMinimap: () =>
+      set((s) => {
+        writeFlag("lattira.minimap", !s.minimapOpen);
+        return { minimapOpen: !s.minimapOpen };
+      }),
 
     showToast(message) {
       set({ toast: message });

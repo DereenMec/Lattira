@@ -48,6 +48,8 @@ export interface Backend {
   assetUrl(asset: Asset): string;
   /** 用系统默认程序打开文件 */
   openAsset(asset: Asset): Promise<void>;
+  /** 后台 OCR 等更新了某个资源时回调；返回取消订阅函数 */
+  subscribeAssetUpdates(onUpdate: (assetId: ID) => void): () => void;
 
   /** 日历：返回 [from, to] 区间内每个画布被编辑过的日期 */
   calendarDays(from: LocalDate, to: LocalDate): Promise<CanvasDay[]>;

@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod files;
+mod ocr;
 mod workspace;
 
 use workspace::AppState;

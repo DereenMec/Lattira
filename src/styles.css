@@ -478,6 +478,7 @@ kbd {
   display: flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--ink-3);
   margin-right: 6px;
@@ -1190,4 +1191,182 @@ kbd {
   box-shadow: var(--shadow-lg);
   z-index: 60;
   max-width: 80vw;
+}
+
+/* ---------- 画布卡片与缩略图 ---------- */
+.canvas-card-thumb {
+  padding: 8px;
+}
+.thumb {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.thumb-empty {
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+.thumb-item {
+  fill: var(--card-default);
+  stroke: var(--line-strong);
+}
+.thumb-item.thumb-s {
+  fill: color-mix(in srgb, var(--accent) 6%, transparent);
+  stroke-dasharray: 6 4;
+}
+.thumb-item.color-red {
+  fill: var(--card-red);
+}
+.thumb-item.color-orange {
+  fill: var(--card-orange);
+}
+.thumb-item.color-yellow {
+  fill: var(--card-yellow);
+}
+.thumb-item.color-green {
+  fill: var(--card-green);
+}
+.thumb-item.color-blue {
+  fill: var(--card-blue);
+}
+.thumb-item.color-purple {
+  fill: var(--card-purple);
+}
+.thumb-text {
+  fill: var(--ink-2);
+  font-weight: 600;
+}
+.thumb-edge {
+  stroke: var(--ink-3);
+}
+.canvas-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.canvas-card-project {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-group + .recent-group {
+  margin-top: 28px;
+}
+.recent-group h2 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+/* ---------- 画布拖到项目 ---------- */
+body.is-dragging-canvas,
+body.is-dragging-canvas * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+.nav-item.is-drop-target {
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
+}
+.nav-item.is-drop-over {
+  background: var(--accent);
+  color: var(--accent-ink);
+  outline: none;
+}
+.nav-item.is-drop-over .count {
+  color: var(--accent-ink);
+}
+.drag-ghost {
+  position: fixed;
+  z-index: 70;
+  max-width: 240px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-lg);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.drag-ghost.is-over {
+  border-color: var(--accent);
+}
+.drag-handle {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--ink-3);
+  cursor: grab;
+}
+.drag-handle:hover {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+/* ---------- 低缩放时的简化绘制 ---------- */
+.el.is-lod {
+  box-shadow: none;
+}
+.el-text-lod {
+  padding: 14px 16px;
+  font-size: 34px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 小地图 ---------- */
+.minimap {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+.minimap canvas {
+  display: block;
+}
+.mm-view {
+  position: absolute;
+  border: 1.5px solid var(--select);
+  background: color-mix(in srgb, var(--select) 12%, transparent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.tb-icon.is-on {
+  color: var(--accent);
+}
+
+/* ---------- 检查器：图中文字 ---------- */
+.inspector h3.spaced {
+  margin-top: 18px;
+}
+.ocr-text {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-family: var(--font);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
 }

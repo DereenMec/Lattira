@@ -2,8 +2,10 @@ import { create } from "zustand";
 import { boundsOf } from "@/lib/geometry";
 import { uuidv7 } from "@/lib/id";
 import { fromJsonCanvas, toJsonCanvas } from "@/lib/jsonCanvas";
+import { buildPreview } from "@/lib/preview";
 import { backend } from "@/services/backend";
 import type {
+  Asset,
   CanvasDoc,
   CanvasElement,
   CanvasIndex,
@@ -26,7 +28,10 @@ type ElementPatch = Partial<Omit<CanvasElement, "id" | "type">> & { text?: strin
 type SaveState = "saved" | "pending" | "saving" | "error";
 
 interface CanvasState {
+  /** 画布内容；其中的 viewport 只在加载和保存时使用，平时以下面的 viewport 为准 */
   doc: CanvasDoc | null;
+  /** 单独存放，平移缩放时不会让依赖 doc 的组件重新渲染 */
+  viewport: Viewport;
   selectedIds: ID[];
   selectedEdgeId: ID | null;
   editingId: ID | null;
@@ -90,7 +95,7 @@ function diff(prev: Snapshot, next: Snapshot): ChangeSummary {
   return { added, modified, removed };
 }
 
-function indexOf(doc: CanvasDoc): CanvasIndex {
+function indexOf(doc: CanvasDoc, assets: ReadonlyMap<ID, Asset>): CanvasIndex {
   const texts: CanvasIndex["texts"] = [];
   const assetIds = new Set<ID>();
   for (const el of doc.elements) {
@@ -98,7 +103,7 @@ function indexOf(doc: CanvasDoc): CanvasIndex {
     if (el.type === "section" && el.label.trim()) texts.push({ elementId: el.id, text: el.label });
     if (el.type === "image" || el.type === "file") assetIds.add(el.assetId);
   }
-  return { elementCount: doc.elements.length, texts, assetIds: [...assetIds] };
+  return { elementCount: doc.elements.length, texts, assetIds: [...assetIds], preview: buildPreview(doc, assets) };
 }
 
 function applyPatches(elements: CanvasElement[], patches: Record<ID, ElementPatch>, now: number): CanvasElement[] {
@@ -139,8 +144,9 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
     set({ saveState: "saving" });
     const run = async () => {
       try {
-        const content = toJsonCanvas(doc, useAppStore.getState().assets);
-        const meta = await backend.saveCanvas(doc.canvasId, content, indexOf(doc), changes);
+        const { assets } = useAppStore.getState();
+        const content = toJsonCanvas({ ...doc, viewport: get().viewport }, assets);
+        const meta = await backend.saveCanvas(doc.canvasId, content, indexOf(doc, assets), changes);
         lastSaved = current;
         useAppStore.getState().canvasSaved(meta);
         if (get().doc?.canvasId === doc.canvasId && saveTimer === undefined) set({ saveState: "saved" });
@@ -156,6 +162,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
 
   return {
     doc: null,
+    viewport: { x: 0, y: 0, zoom: 1 },
     selectedIds: [],
     selectedEdgeId: null,
     editingId: null,
@@ -170,7 +177,16 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       past = [];
       future = [];
       lastSaved = snapshotOf(doc);
-      set({ doc, selectedIds: [], selectedEdgeId: null, editingId: null, saveState: "saved", canUndo: false, canRedo: false });
+      set({
+        doc,
+        viewport: doc.viewport,
+        selectedIds: [],
+        selectedEdgeId: null,
+        editingId: null,
+        saveState: "saved",
+        canUndo: false,
+        canRedo: false,
+      });
     },
 
     async flush() {
@@ -179,9 +195,8 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
     },
 
     setViewport(viewport) {
-      const { doc } = get();
-      if (!doc) return;
-      set({ doc: { ...doc, viewport } });
+      if (!get().doc) return;
+      set({ viewport });
       // 视口只需要随下一次保存落盘，不单独计入编辑
       if (saveTimer === undefined && get().saveState === "saved") {
         saveTimer = window.setTimeout(() => void save(), SAVE_DELAY * 3);

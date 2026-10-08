@@ -1,6 +1,6 @@
 import { ExternalLink } from "lucide-react";
 import { formatRelative } from "@/lib/date";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, isOcrMime } from "@/lib/format";
 import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
@@ -91,6 +91,18 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
                   <button className="btn" onClick={() => void backend.openAsset(asset)}>
                     <ExternalLink size={14} /> 用默认程序打开
                   </button>
+                  {selected[0].type === "image" && isOcrMime(asset.mime) && asset.ocrText !== undefined && (
+                    <>
+                      <h3 className="spaced">图中文字</h3>
+                      {asset.ocrText === null ? (
+                        <p className="hint">正在识别…</p>
+                      ) : asset.ocrText ? (
+                        <pre className="ocr-text">{asset.ocrText}</pre>
+                      ) : (
+                        <p className="hint">没有识别到文字。</p>
+                      )}
+                    </>
+                  )}
                 </>
               );
             })()}

@@ -1,9 +1,9 @@
 import { Archive, Plus, Shapes } from "lucide-react";
 import { useEffect, useState } from "react";
-import { formatRelative } from "@/lib/date";
 import { confirmAction } from "@/services/confirm";
 import { useAppStore } from "@/store/appStore";
 import type { ID } from "@/types/model";
+import { CanvasCard } from "./CanvasCard";
 
 export function ProjectView({ projectId }: { projectId: ID }) {
   const project = useAppStore((s) => s.projects.find((p) => p.id === projectId));
@@ -33,7 +33,7 @@ export function ProjectView({ projectId }: { projectId: ID }) {
       <header className="page-head">
         <span className="project-dot" style={{ background: project.color }} />
         {project.isInbox ? (
-          <h1>收件箱</h1>
+          <h1>未分类</h1>
         ) : (
           <input
             className="page-title-input"
@@ -55,7 +55,7 @@ export function ProjectView({ projectId }: { projectId: ID }) {
           </button>
         </div>
       </header>
-      {project.isInbox && <p className="page-desc">没有归类的画布放在这里。整理好后，可以在画布顶栏的「所属项目」里把它移到某个项目。</p>}
+      {project.isInbox && <p className="page-desc">没有归到任何项目的画布放在这里。把画布卡片拖到左侧的项目上，就能移过去。</p>}
 
       {canvases.length === 0 ? (
         <div className="empty-block">
@@ -68,15 +68,7 @@ export function ProjectView({ projectId }: { projectId: ID }) {
       ) : (
         <div className="canvas-grid">
           {canvases.map((c) => (
-            <button key={c.id} className="canvas-card" onClick={() => navigate({ kind: "canvas", canvasId: c.id })}>
-              <div className="canvas-card-thumb">
-                <Shapes size={22} />
-              </div>
-              <div className="canvas-card-title">{c.title}</div>
-              <div className="canvas-card-meta">
-                {c.elementCount} 个元素 · {formatRelative(c.updatedAt)}
-              </div>
-            </button>
+            <CanvasCard key={c.id} canvas={c} />
           ))}
         </div>
       )}

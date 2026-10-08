@@ -1,6 +1,8 @@
-import { CalendarDays, FolderOpen, Inbox, Library, Plus, Search } from "lucide-react";
+import { CalendarDays, Clock, FolderOpen, Inbox, Library, Plus, Search } from "lucide-react";
 import { useState } from "react";
 import { inboxOf, useAppStore, type View } from "@/store/appStore";
+import type { ID } from "@/types/model";
+import { useCanvasDrag } from "./canvasDrag";
 
 export function Sidebar() {
   const workspace = useAppStore((s) => s.workspace);
@@ -8,6 +10,8 @@ export function Sidebar() {
   const canvases = useAppStore((s) => s.canvases);
   const view = useAppStore((s) => s.view);
   const navigate = useAppStore((s) => s.navigate);
+  const dropOver = useCanvasDrag((s) => s.drag?.overProjectId ?? null);
+  const dragging = useCanvasDrag((s) => s.drag !== null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
 
@@ -17,6 +21,9 @@ export function Sidebar() {
   const userProjects = projects.filter((p) => !p.isInbox && !p.archived);
   const countOf = (projectId: string) => canvases.filter((c) => c.projectId === projectId).length;
   const is = (kind: View["kind"]) => view.kind === kind;
+  /** 项目条目同时是画布拖放的目标 */
+  const projectClass = (id: ID) =>
+    `nav-item${currentProjectId === id ? " is-active" : ""}${dragging ? " is-drop-target" : ""}${dropOver === id ? " is-drop-over" : ""}`;
 
   const submit = async () => {
     const trimmed = name.trim();
@@ -40,16 +47,21 @@ export function Sidebar() {
       <button className="nav-item search-trigger" onClick={() => useAppStore.getState().setSearchOpen(true)}>
         <Search size={16} />
         <span>搜索</span>
-        <kbd>Ctrl K</kbd>
+        <kbd>Ctrl E</kbd>
       </button>
 
+      <button className={`nav-item${is("recent") ? " is-active" : ""}`} onClick={() => navigate({ kind: "recent" })}>
+        <Clock size={16} />
+        <span>最近</span>
+      </button>
       {inbox && (
         <button
-          className={`nav-item${currentProjectId === inbox.id ? " is-active" : ""}`}
+          className={projectClass(inbox.id)}
+          data-drop-project={inbox.id}
           onClick={() => navigate({ kind: "project", projectId: inbox.id })}
         >
           <Inbox size={16} />
-          <span>收件箱</span>
+          <span>未分类</span>
           <span className="count">{countOf(inbox.id)}</span>
         </button>
       )}
@@ -89,7 +101,8 @@ export function Sidebar() {
         {userProjects.map((p) => (
           <button
             key={p.id}
-            className={`nav-item${currentProjectId === p.id ? " is-active" : ""}`}
+            className={projectClass(p.id)}
+            data-drop-project={p.id}
             onClick={() => navigate({ kind: "project", projectId: p.id })}
           >
             <span className="dot" style={{ background: p.color }} />
