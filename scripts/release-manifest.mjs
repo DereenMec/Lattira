@@ -1,5 +1,5 @@
 // 生成在线更新用的 latest.json，与安装包一起上传到 GitHub Release。
-// 用法：先带签名私钥构建（见 README「发布」），再运行
+// 用法：先带签名私钥构建（见 docs/DEVELOPMENT.md「发布」），再运行
 //   npm run release:manifest -- [更新说明文件.md]
 import fs from "node:fs";
 import path from "node:path";
@@ -11,7 +11,7 @@ const exe = `${conf.productName}_${version}_x64-setup.exe`;
 const dir = path.join(root, "src-tauri/target/release/bundle/nsis");
 const sigPath = path.join(dir, `${exe}.sig`);
 if (!fs.existsSync(sigPath)) {
-  console.error(`找不到签名文件 ${sigPath}\n构建前需要设置 TAURI_SIGNING_PRIVATE_KEY，见 README「发布」。`);
+  console.error(`找不到签名文件 ${sigPath}\n构建前需要设置 TAURI_SIGNING_PRIVATE_KEY，见 docs/DEVELOPMENT.md「发布」。`);
   process.exit(1);
 }
 const notesFile = process.argv[2];

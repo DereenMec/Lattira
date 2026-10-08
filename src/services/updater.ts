@@ -1,6 +1,6 @@
 /**
  * 在线更新：从 GitHub Release 的 latest.json 检查新版本，下载安装包后自动安装并重启。
- * 发布方法见 README「发布」；浏览器预览中不可用。
+ * 发布方法见 docs/DEVELOPMENT.md「发布」；浏览器预览中不可用。
  */
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
