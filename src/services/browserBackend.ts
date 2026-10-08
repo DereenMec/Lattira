@@ -1,7 +1,7 @@
 import { t } from "@/i18n";
 import { toLocalDate } from "@/lib/date";
 import { uuidv7 } from "@/lib/id";
-import type { Asset, CanvasDay, CanvasMeta, ID, Project, SearchHit, WorkspaceInfo } from "@/types/model";
+import type { Asset, CanvasDay, CanvasMeta, ID, Project, SearchHit, TrashItem, WorkspaceInfo } from "@/types/model";
 import { PROJECT_COLORS } from "@/types/model";
 import type { Backend, CopyPayload } from "./backend";
 
@@ -17,6 +17,11 @@ interface State {
   assets: Asset[];
   texts: Record<ID, { elementId: ID; text: string }[]>;
   assetRefs: Record<ID, ID[]>;
+  /** 回收站；早期保存的数据里没有这一项 */
+  trash?: {
+    canvases: (CanvasMeta & { deletedAt: number })[];
+    assets: (Asset & { deletedAt: number })[];
+  };
 }
 
 const KEY = "lattira.dev.state";
@@ -36,6 +41,7 @@ export function createBrowserBackend(): Backend {
   const state = load();
   // 早期版本叫「收件箱」
   for (const p of state.projects) if (p.isInbox && p.name === "收件箱") p.name = "未分类";
+  const trash = (state.trash ??= { canvases: [], assets: [] });
   const blobUrls = new Map<ID, string>();
   let copied: CopyPayload | null = null;
 
@@ -132,12 +138,13 @@ export function createBrowserBackend(): Backend {
       persist();
       return { ...c };
     },
+    /** 移到回收站：画布内容和日历记录保留，恢复时原样放回 */
     async deleteCanvas(id) {
-      state.canvases = state.canvases.filter((c) => c.id !== id);
-      state.days = state.days.filter((d) => d.canvasId !== id);
+      const c = findCanvas(id);
+      state.canvases = state.canvases.filter((x) => x.id !== id);
+      trash.canvases.push({ ...c, deletedAt: Date.now() });
       delete state.texts[id];
       delete state.assetRefs[id];
-      localStorage.removeItem(contentKey(id));
       persist();
     },
     async loadCanvas(id) {
@@ -263,8 +270,9 @@ export function createBrowserBackend(): Backend {
         }
         state.assetRefs[canvasId] = refs.filter((id) => !gone.has(id));
       }
+      const now = Date.now();
+      for (const a of state.assets) if (gone.has(a.id)) trash.assets.push({ ...a, deletedAt: now });
       state.assets = state.assets.filter((a) => !gone.has(a.id));
-      for (const id of ids) blobUrls.delete(id);
       persist();
       return { canvasIds, removedCards };
     },
@@ -278,6 +286,117 @@ export function createBrowserBackend(): Backend {
     },
     subscribeAssetUpdates() {
       return () => {};
+    },
+
+    async exportCanvas(canvas) {
+      // 浏览器里拿不到文件本体，只导出画布文件本身
+      const content = localStorage.getItem(contentKey(canvas.id)) ?? "";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+      a.download = `${canvas.title}.canvas`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      return true;
+    },
+    async importCanvases(projectId) {
+      const files = await new Promise<File[]>((resolve) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".canvas";
+        input.multiple = true;
+        input.onchange = () => resolve(Array.from(input.files ?? []));
+        input.oncancel = () => resolve([]);
+        input.click();
+      });
+      const out: CanvasMeta[] = [];
+      for (const f of files) {
+        const doc = JSON.parse(await f.text()) as { nodes?: Record<string, unknown>[]; edges?: unknown[] };
+        // 引用的文件不在本工作区时，变成写着原路径的文本卡片
+        for (const n of doc.nodes ?? []) {
+          const lattira = n.lattira as { assetId?: ID } | undefined;
+          if (n.type === "file" && !state.assets.some((a) => a.id === lattira?.assetId)) {
+            Object.assign(n, { type: "text", text: t("找不到文件：{file}", { file: String(n.file ?? "") }), lattira: undefined });
+          }
+        }
+        const now = Date.now();
+        const c: CanvasMeta = {
+          id: uuidv7(),
+          projectId,
+          title: f.name.replace(/\.canvas$/i, "") || t("导入的画布"),
+          elementCount: doc.nodes?.length ?? 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+        localStorage.setItem(contentKey(c.id), JSON.stringify({ nodes: doc.nodes ?? [], edges: doc.edges ?? [] }, null, 2));
+        state.canvases.push(c);
+        out.push({ ...c });
+      }
+      persist();
+      return out;
+    },
+
+    async listTrash() {
+      const items: TrashItem[] = [
+        ...trash.canvases.map((c) => ({
+          kind: "canvas" as const,
+          id: c.id,
+          name: c.title,
+          deletedAt: c.deletedAt,
+          size: (localStorage.getItem(contentKey(c.id)) ?? "").length,
+          projectId: c.projectId,
+          elementCount: c.elementCount,
+          preview: c.preview,
+        })),
+        ...trash.assets.map((a) => ({ kind: "asset" as const, id: a.id, name: a.name, deletedAt: a.deletedAt, size: a.size, mime: a.mime })),
+      ];
+      return items.sort((a, b) => b.deletedAt - a.deletedAt);
+    },
+    async restoreTrash(items) {
+      const canvases: CanvasMeta[] = [];
+      const assets: Asset[] = [];
+      for (const item of items) {
+        if (item.kind === "canvas") {
+          const c = trash.canvases.find((x) => x.id === item.id);
+          if (!c) continue;
+          trash.canvases = trash.canvases.filter((x) => x.id !== item.id);
+          const { deletedAt: _, ...meta } = c;
+          // 原项目已归档时放进「未分类」
+          const project = state.projects.find((p) => p.id === meta.projectId);
+          if (!project || project.archived) meta.projectId = state.projects.find((p) => p.isInbox)!.id;
+          state.canvases.push(meta);
+          canvases.push({ ...meta });
+        } else {
+          const a = trash.assets.find((x) => x.id === item.id);
+          if (!a) continue;
+          trash.assets = trash.assets.filter((x) => x.id !== item.id);
+          const { deletedAt: _, ...asset } = a;
+          const existing = state.assets.find((x) => x.hash === asset.hash);
+          if (!existing) state.assets.push(asset);
+          assets.push({ ...(existing ?? asset), refCount: 0 });
+        }
+      }
+      persist();
+      return { canvases, assets };
+    },
+    async purgeTrash(items) {
+      for (const item of items) {
+        if (item.kind === "canvas") {
+          if (!trash.canvases.some((c) => c.id === item.id)) continue;
+          trash.canvases = trash.canvases.filter((c) => c.id !== item.id);
+          state.days = state.days.filter((d) => d.canvasId !== item.id);
+          localStorage.removeItem(contentKey(item.id));
+        } else {
+          trash.assets = trash.assets.filter((a) => a.id !== item.id);
+          blobUrls.delete(item.id);
+        }
+      }
+      persist();
+    },
+    async emptyTrash() {
+      await this.purgeTrash([
+        ...trash.canvases.map((c) => ({ kind: "canvas" as const, id: c.id })),
+        ...trash.assets.map((a) => ({ kind: "asset" as const, id: a.id })),
+      ]);
     },
 
     async calendarDays(from, to) {

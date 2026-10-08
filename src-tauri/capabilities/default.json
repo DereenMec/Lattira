@@ -1,7 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口的权限：系统对话框。文件读写、剪贴板全部经由应用自身的命令完成。",
-  "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "description": "主窗口的权限：系统对话框、窗口主题、在线更新与更新后重启。文件读写、剪贴板全部经由应用自身的命令完成。",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-theme",
+    "dialog:default",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }

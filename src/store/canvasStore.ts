@@ -9,6 +9,7 @@ import type {
   CanvasDoc,
   CanvasElement,
   CanvasIndex,
+  CanvasMeta,
   ChangeSummary,
   Edge,
   ID,
@@ -40,8 +41,8 @@ interface CanvasState {
   editingId: ID | null;
   /** 正在大窗口中编辑的文本卡片 */
   editorId: ID | null;
-  /** 请求画布把某个元素移到视口中央；n 递增以便重复定位同一元素 */
-  focusRequest: { id: ID; n: number } | null;
+  /** 请求画布把某个元素移到视口中央；n 递增以便重复定位同一元素；select 为 false 时只定位不选中 */
+  focusRequest: { id: ID; n: number; select: boolean } | null;
   saveState: SaveState;
   canUndo: boolean;
   canRedo: boolean;
@@ -74,7 +75,7 @@ interface CanvasState {
 
   openEditor(id: ID): void;
   closeEditor(): void;
-  requestFocus(id: ID): void;
+  requestFocus(id: ID, opts?: { select?: boolean }): void;
 
   /** 拖动、缩放等连续手势：开始时记一次历史，过程中的更新不进历史 */
   beginGesture(): void;
@@ -95,6 +96,23 @@ let lastSaved: Snapshot = { elements: [], edges: [] };
 let gestureBase: Snapshot | null = null;
 let saveTimer: number | undefined;
 let savingPromise: Promise<void> | null = null;
+let loadSeq = 0;
+
+/** 后台标签页的画布：切回来时原样恢复，撤销历史和选中状态都还在 */
+interface CachedCanvas {
+  doc: CanvasDoc;
+  viewport: Viewport;
+  selectedIds: ID[];
+  past: Snapshot[];
+  future: Snapshot[];
+  lastSaved: Snapshot;
+}
+const cache = new Map<ID, CachedCanvas>();
+
+/** 画布文件被别处改过（例如删除资源时移除了卡片）后调用，下次打开时重新从磁盘读取 */
+export function dropCanvasCache(ids: ID[]) {
+  for (const id of ids) cache.delete(id);
+}
 
 const snapshotOf = (doc: CanvasDoc): Snapshot => ({ elements: doc.elements, edges: doc.edges });
 
@@ -195,8 +213,41 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
     canRedo: false,
 
     async load(canvasId) {
+      const seq = ++loadSeq;
       await get().flush();
+      // 连续快速切换标签页时，只有最后一次切换生效
+      if (seq !== loadSeq) return;
+      const current = get();
+      if (current.doc && current.doc.canvasId !== canvasId && useAppStore.getState().tabs.includes(current.doc.canvasId)) {
+        cache.set(current.doc.canvasId, {
+          doc: current.doc,
+          viewport: current.viewport,
+          selectedIds: current.selectedIds,
+          past,
+          future,
+          lastSaved,
+        });
+      }
+      const cached = cache.get(canvasId);
+      if (cached) {
+        cache.delete(canvasId);
+        ({ past, future, lastSaved } = cached);
+        set({
+          doc: cached.doc,
+          viewport: cached.viewport,
+          selectedIds: cached.selectedIds,
+          selectedEdgeId: null,
+          editingId: null,
+          editorId: null,
+          focusRequest: null,
+          saveState: "saved",
+          canUndo: past.length > 0,
+          canRedo: future.length > 0,
+        });
+        return;
+      }
       const content = await backend.loadCanvas(canvasId);
+      if (seq !== loadSeq) return;
       const doc = fromJsonCanvas(content, canvasId);
       past = [];
       future = [];
@@ -363,7 +414,8 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
 
     openEditor: (editorId) => set({ editorId, editingId: null }),
     closeEditor: () => set({ editorId: null }),
-    requestFocus: (id) => set((s) => ({ focusRequest: { id, n: (s.focusRequest?.n ?? 0) + 1 } })),
+    requestFocus: (id, opts) =>
+      set((s) => ({ focusRequest: { id, n: (s.focusRequest?.n ?? 0) + 1, select: opts?.select ?? true } })),
 
     groupSelection() {
       const { doc, selectedIds } = get();
@@ -430,6 +482,22 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       scheduleSave();
     },
   };
+});
+
+/**
+ * 重新保存一次不在编辑中的画布（不计入编辑记录），重建搜索索引、资源引用和缩略图。
+ * 用于从回收站恢复或刚导入的画布：这些信息都由前端生成。
+ */
+export async function reindexCanvas(canvasId: ID): Promise<CanvasMeta> {
+  const doc = fromJsonCanvas(await backend.loadCanvas(canvasId), canvasId);
+  const { assets } = useAppStore.getState();
+  return backend.saveCanvas(canvasId, toJsonCanvas(doc, assets), indexOf(doc, assets), { added: 0, modified: 0, removed: 0 });
+}
+
+// 关掉的标签页不再保留
+useAppStore.subscribe((s, prev) => {
+  if (s.tabs === prev.tabs) return;
+  for (const id of cache.keys()) if (!s.tabs.includes(id)) cache.delete(id);
 });
 
 /** 退出前尽量把修改写盘 */

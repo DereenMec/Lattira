@@ -16,6 +16,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Tauri(#[from] tauri::Error),
+    #[error("压缩包读写失败：{0}")]
+    Zip(#[from] zip::result::ZipError),
 }
 
 /// 命令返回的错误以字符串形式交给前端

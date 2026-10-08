@@ -661,7 +661,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
   // 其他组件（如检查器的文件列表）请求定位某个元素
   const focusRequest = useCanvasStore((s) => s.focusRequest);
   useEffect(() => {
-    if (focusRequest) revealElement(focusRequest.id);
+    if (focusRequest) revealElement(focusRequest.id, focusRequest.select);
   }, [focusRequest]);
 
   // 浏览器预览模式下的 HTML5 拖放
@@ -692,7 +692,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
 
   /** 把元素移到视口中央（缩得太小时放大到 100%），选中并闪一下 */
   const revealElement = useCallback(
-    (id: ID) => {
+    (id: ID, select = true) => {
       const el = canvas().doc?.elements.find((e) => e.id === id);
       if (!el || size.w === 0) return;
       const vp = canvas().viewport;
@@ -702,7 +702,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         x: size.w / 2 - (el.x + el.width / 2) * zoom,
         y: size.h / 2 - (el.y + el.height / 2) * zoom,
       });
-      canvas().select([id]);
+      if (select) canvas().select([id]);
       setHighlightId(id);
       window.clearTimeout(highlightTimer.current);
       highlightTimer.current = window.setTimeout(() => setHighlightId(null), 1600);

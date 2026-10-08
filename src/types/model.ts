@@ -159,4 +159,24 @@ export interface SearchHit {
   snippet: string;
 }
 
+export type TrashKind = "canvas" | "asset";
+
+/** 回收站中的一项：删除的画布或文件，与 src-tauri/src/trash.rs 的 TrashItem 对应 */
+export interface TrashItem {
+  kind: TrashKind;
+  id: ID;
+  /** 画布标题或文件名 */
+  name: string;
+  deletedAt: Timestamp;
+  size: number;
+  /** 画布：原来所属的项目 */
+  projectId?: ID | null;
+  elementCount?: number | null;
+  preview?: string | null;
+  /** 文件：类型 */
+  mime?: string | null;
+}
+
+export type TrashRef = Pick<TrashItem, "kind" | "id">;
+
 export const PROJECT_COLORS = ["#2F5D50", "#C2410C", "#B45309", "#4D7C0F", "#0E7490", "#4338CA", "#9D174D"] as const;

@@ -13,6 +13,8 @@ import {
   Copy,
   CopyPlus,
   ExternalLink,
+  FileInput,
+  FileOutput,
   FilePen,
   FilePlus,
   FolderInput,
@@ -28,6 +30,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { copySelection } from "@/features/canvas/clipboard";
+import { exportCanvas, importCanvases } from "@/features/canvas/transfer";
 import { openProjectStyle } from "@/features/project/ProjectStyleDialog";
 import { ProjectIcon } from "@/features/project/projectIcons";
 import { t } from "@/i18n";
@@ -295,13 +298,14 @@ export function canvasMenu(canvas: CanvasMeta): MenuEntry[] {
       disabled: backend.kind !== "tauri",
       onSelect: () => attempt(t("打开资源管理器"), () => backend.revealCanvas(canvas.id)),
     },
+    { label: t("导出…"), icon: <FileOutput size={S} />, onSelect: () => void exportCanvas(canvas) },
     "separator",
     {
       label: t("删除"),
       icon: <Trash2 size={S} />,
       danger: true,
       onSelect: async () => {
-        if (await confirmAction(t("删除画布「{name}」？画布文件会移到工作区的回收站文件夹。", { name: canvas.title }))) {
+        if (await confirmAction(t("删除画布「{name}」？之后可以在回收站中恢复。", { name: canvas.title }))) {
           await attempt(t("删除"), () => deleteCanvas(canvas.id));
         }
       },
@@ -315,6 +319,7 @@ export function projectMenu(project: Project): MenuEntry[] {
   return [
     { label: t("打开"), icon: <ExternalLink size={S} />, onSelect: () => navigate({ kind: "project", projectId: project.id }) },
     { label: t("新建画布"), icon: <FilePlus size={S} />, onSelect: () => attempt(t("新建画布"), () => createCanvas(project.id)) },
+    { label: t("导入画布…"), icon: <FileInput size={S} />, onSelect: () => void importCanvases(project.id) },
     ...(project.isInbox
       ? []
       : ([

@@ -9,6 +9,8 @@ import type {
   LocalDate,
   Project,
   SearchHit,
+  TrashItem,
+  TrashRef,
   WorkspaceInfo,
 } from "@/types/model";
 import { createBrowserBackend } from "./browserBackend";
@@ -88,6 +90,19 @@ export interface Backend {
   readClipboard(): Promise<ClipboardContent>;
   /** 后台 OCR 等更新了某个资源时回调；返回取消订阅函数 */
   subscribeAssetUpdates(onUpdate: (assetId: ID) => void): () => void;
+
+  /** 让用户选位置，把画布连同引用的文件导出为画布包（.zip）；取消时返回 false */
+  exportCanvas(canvas: CanvasMeta): Promise<boolean>;
+  /** 让用户选择画布包或 .canvas 文件导入到项目；取消时返回空数组 */
+  importCanvases(projectId: ID): Promise<CanvasMeta[]>;
+
+  /** 回收站：删除的画布和文件，按删除时间从近到远 */
+  listTrash(): Promise<TrashItem[]>;
+  /** 恢复；恢复的画布需要重新保存一次以重建搜索索引（见 canvasStore 的 reindexCanvas） */
+  restoreTrash(items: TrashRef[]): Promise<{ canvases: CanvasMeta[]; assets: Asset[] }>;
+  /** 永久删除 */
+  purgeTrash(items: TrashRef[]): Promise<void>;
+  emptyTrash(): Promise<void>;
 
   /** 日历：返回 [from, to] 区间内每个画布被编辑过的日期 */
   calendarDays(from: LocalDate, to: LocalDate): Promise<CanvasDay[]>;

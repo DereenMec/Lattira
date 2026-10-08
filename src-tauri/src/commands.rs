@@ -50,9 +50,9 @@ pub struct ProjectPatch {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasMeta {
-    id: String,
+    pub(crate) id: String,
     project_id: String,
-    title: String,
+    pub(crate) title: String,
     element_count: i64,
     created_at: i64,
     updated_at: i64,
@@ -70,11 +70,11 @@ pub struct CanvasPatch {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
-    id: String,
+    pub(crate) id: String,
     hash: String,
-    path: String,
-    name: String,
-    mime: String,
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) mime: String,
     size: i64,
     width: Option<i64>,
     height: Option<i64>,
@@ -187,13 +187,13 @@ fn get_project(conn: &Connection, id: &str) -> Result<Project> {
         .ok_or_else(|| Error::NotFound("项目", id.into()))
 }
 
-fn project_dir(conn: &Connection, id: &str) -> Result<String> {
+pub(crate) fn project_dir(conn: &Connection, id: &str) -> Result<String> {
     conn.query_row("SELECT dir FROM projects WHERE id = ?1", [id], |r| r.get(0))
         .optional()?
         .ok_or_else(|| Error::NotFound("项目", id.into()))
 }
 
-fn get_canvas(conn: &Connection, id: &str) -> Result<CanvasMeta> {
+pub(crate) fn get_canvas(conn: &Connection, id: &str) -> Result<CanvasMeta> {
     conn.query_row(
         &format!("SELECT {CANVAS_COLS} FROM canvases WHERE id = ?1 AND deleted_at IS NULL"),
         [id],
@@ -203,13 +203,13 @@ fn get_canvas(conn: &Connection, id: &str) -> Result<CanvasMeta> {
     .ok_or_else(|| Error::NotFound("画布", id.into()))
 }
 
-fn canvas_file(conn: &Connection, id: &str) -> Result<String> {
+pub(crate) fn canvas_file(conn: &Connection, id: &str) -> Result<String> {
     conn.query_row("SELECT file FROM canvases WHERE id = ?1 AND deleted_at IS NULL", [id], |r| r.get(0))
         .optional()?
         .ok_or_else(|| Error::NotFound("画布", id.into()))
 }
 
-fn get_asset(conn: &Connection, filter: &str, value: &str) -> Result<Option<Asset>> {
+pub(crate) fn get_asset(conn: &Connection, filter: &str, value: &str) -> Result<Option<Asset>> {
     Ok(conn.query_row(&format!("{ASSET_SELECT} WHERE a.{filter} = ?1"), [value], asset_row).optional()?)
 }
 
@@ -379,7 +379,7 @@ pub async fn update_canvas(state: State<'_, AppState>, id: String, patch: Canvas
     })
 }
 
-/// 删除画布：文件移到 .lattira/trash/，元数据标记删除（日后可做回收站恢复）
+/// 删除画布：文件移到 .lattira/trash/<id>.canvas，元数据标记删除，可在回收站恢复（见 trash.rs）
 #[tauri::command]
 pub async fn delete_canvas(state: State<'_, AppState>, id: String) -> Result<()> {
     state.with(|ws| {
@@ -469,7 +469,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let mut reader = BufReader::new(fs::File::open(path)?);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
@@ -484,7 +484,7 @@ fn hash_file(path: &Path) -> Result<String> {
 }
 
 /// 为新文件在 assets/<YYYY-MM>/ 下分配一个不冲突的路径
-fn asset_destination(ws: &Workspace, name: &str) -> Result<std::path::PathBuf> {
+pub(crate) fn asset_destination(ws: &Workspace, name: &str) -> Result<std::path::PathBuf> {
     let dir = ws.root.join("assets").join(chrono::Local::now().format("%Y-%m").to_string());
     fs::create_dir_all(&dir)?;
     let p = Path::new(name);
@@ -511,7 +511,7 @@ fn register_asset(ws: &Workspace, hash: &str, dest: &Path, name: &str) -> Result
 }
 
 /// 复制一个外部文件进工作区；内容相同的文件只存一份
-fn import_file(ws: &Workspace, src: &Path) -> Result<Asset> {
+pub(crate) fn import_file(ws: &Workspace, src: &Path) -> Result<Asset> {
     if !src.is_file() {
         return Err(Error::Invalid(format!("暂不支持导入文件夹：{}", src.display())));
     }
@@ -534,9 +534,9 @@ pub enum ImportNode {
 }
 
 /// 一次导入最多的文件数，防止误拖整个磁盘
-const MAX_IMPORT_FILES: usize = 1000;
+pub(crate) const MAX_IMPORT_FILES: usize = 1000;
 
-fn skip_entry(name: &str) -> bool {
+pub(crate) fn skip_entry(name: &str) -> bool {
     name.starts_with('.') || name.eq_ignore_ascii_case("thumbs.db") || name.eq_ignore_ascii_case("desktop.ini")
 }
 
@@ -793,7 +793,7 @@ fn strip_asset_cards(path: &Path, assets: &HashSet<String>) -> Result<(usize, us
     Ok((removed.len(), remaining))
 }
 
-/// 删除资源：文件移到 .lattira/trash/assets/，并从所有画布上移除引用它们的卡片
+/// 删除资源：文件移到 .lattira/trash/assets/ 并记入回收站，同时从所有画布上移除引用它们的卡片
 #[tauri::command]
 pub async fn delete_assets(state: State<'_, AppState>, ids: Vec<String>) -> Result<DeleteAssetsResult> {
     state.with(|ws| {
@@ -829,6 +829,7 @@ pub async fn delete_assets(state: State<'_, AppState>, ids: Vec<String>) -> Resu
 
         let trash = ws.root.join(".lattira").join("trash").join("assets");
         fs::create_dir_all(&trash)?;
+        let now = now_ms();
         let tx = ws.conn.transaction()?;
         for id in &set {
             let path: Option<String> =
@@ -839,7 +840,14 @@ pub async fn delete_assets(state: State<'_, AppState>, ids: Vec<String>) -> Resu
                 let name = Path::new(&rel);
                 let stem = name.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let ext = name.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                fs::rename(&src, files::unique_path(&trash, &stem, &ext, None))?;
+                let dest = files::unique_path(&trash, &stem, &ext, None);
+                fs::rename(&src, &dest)?;
+                // 连同元数据（含识别出的文字）记入回收站，恢复时原样放回
+                tx.execute(
+                    "INSERT INTO trashed_assets (id, hash, name, mime, size, width, height, imported_at, ocr_text, original_path, trash_file, deleted_at)
+                     SELECT id, hash, name, mime, size, width, height, imported_at, ocr_text, path, ?2, ?3 FROM assets WHERE id = ?1",
+                    params![id, files::relative(&ws.root, &dest), now],
+                )?;
             }
             tx.execute("DELETE FROM asset_refs WHERE asset_id = ?1", [id])?;
             tx.execute("DELETE FROM assets WHERE id = ?1", [id])?;

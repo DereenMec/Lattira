@@ -10,7 +10,11 @@ export type View =
   | { kind: "canvas"; canvasId: ID; focusElementId?: ID; focusAssetId?: ID }
   | { kind: "recent" }
   | { kind: "calendar" }
-  | { kind: "assets" };
+  | { kind: "assets" }
+  | { kind: "trash" }
+  | { kind: "settings"; section?: SettingsSection };
+
+export type SettingsSection = "general" | "workspace" | "shortcuts" | "about";
 
 interface AppState {
   status: "loading" | "no-workspace" | "ready";
@@ -19,6 +23,8 @@ interface AppState {
   canvases: CanvasMeta[];
   assets: ReadonlyMap<ID, Asset>;
   view: View;
+  /** 打开的画布标签页，按显示顺序 */
+  tabs: ID[];
   searchOpen: boolean;
   inspectorOpen: boolean;
   minimapOpen: boolean;
@@ -26,7 +32,12 @@ interface AppState {
 
   init(): Promise<void>;
   pickWorkspace(): Promise<void>;
+  /** 切换页面；打开画布时如果还没有它的标签页，就在当前标签页右侧新建一个 */
   navigate(view: View): void;
+  /** 关闭标签页；关闭的是当前画布时切到相邻的标签页，没有了就回到它所在的项目 */
+  closeTabs(ids: ID[]): void;
+  /** 切到下一个（1）或上一个（-1）标签页 */
+  cycleTab(delta: 1 | -1): void;
   setSearchOpen(open: boolean): void;
   toggleInspector(): void;
   toggleMinimap(): void;
@@ -66,6 +77,31 @@ function writeFlag(key: string, value: boolean) {
 
 let unsubscribeAssets: (() => void) | undefined;
 
+// ---- 标签页按工作区记住，下次打开时恢复 ----
+interface SavedTabs {
+  tabs: ID[];
+  active: ID | null;
+}
+const tabsKey = (ws: WorkspaceInfo) => `lattira.tabs:${ws.path}`;
+
+function readTabs(ws: WorkspaceInfo): SavedTabs {
+  try {
+    const raw = localStorage.getItem(tabsKey(ws));
+    if (raw) return JSON.parse(raw) as SavedTabs;
+  } catch {
+    // 读不到时从空白开始
+  }
+  return { tabs: [], active: null };
+}
+
+function writeTabs(ws: WorkspaceInfo, saved: SavedTabs) {
+  try {
+    localStorage.setItem(tabsKey(ws), JSON.stringify(saved));
+  } catch {
+    // 只影响下次启动时恢复标签页
+  }
+}
+
 export const inboxOf = (projects: Project[]) => projects.find((p) => p.isInbox);
 
 /** 界面上显示的项目名：「未分类」随界面语言翻译，其余项目用自己的名字 */
@@ -87,14 +123,26 @@ export const useAppStore = create<AppState>()((set, get) => {
       const meta = await backend.createCanvas(inbox.id, t("欢迎使用栖页"));
       all = [await seedWelcomeCanvas(meta.id)];
     }
-    const latest = [...all].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    // 恢复上次打开的标签页；没有时打开最近编辑的画布
+    const alive = new Set(all.map((c) => c.id));
+    const saved = readTabs(ws);
+    let tabs = saved.tabs.filter((id) => alive.has(id));
+    let active = saved.active && tabs.includes(saved.active) ? saved.active : (tabs[0] ?? null);
+    if (!active) {
+      const latest = [...all].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      if (latest) {
+        active = latest.id;
+        tabs = [latest.id];
+      }
+    }
     set({
       workspace: ws,
       projects,
       canvases: all,
       assets: toMap(assets),
       status: "ready",
-      view: latest ? { kind: "canvas", canvasId: latest.id } : { kind: "project", projectId: inbox.id },
+      tabs,
+      view: active ? { kind: "canvas", canvasId: active } : { kind: "project", projectId: inbox.id },
     });
     // 后台 OCR 识别完一张图片后刷新资源信息
     unsubscribeAssets?.();
@@ -108,6 +156,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     canvases: [],
     assets: new Map(),
     view: { kind: "calendar" },
+    tabs: [],
     searchOpen: false,
     inspectorOpen: true,
     minimapOpen: readFlag("lattira.minimap", true),
@@ -133,7 +182,38 @@ export const useAppStore = create<AppState>()((set, get) => {
       }
     },
 
-    navigate: (view) => set({ view }),
+    navigate: (view) =>
+      set((s) => {
+        if (view.kind !== "canvas" || s.tabs.includes(view.canvasId)) return { view };
+        const at = s.view.kind === "canvas" ? s.tabs.indexOf(s.view.canvasId) : -1;
+        const tabs = at >= 0 ? [...s.tabs.slice(0, at + 1), view.canvasId, ...s.tabs.slice(at + 1)] : [...s.tabs, view.canvasId];
+        return { view, tabs };
+      }),
+
+    closeTabs: (ids) =>
+      set((s) => {
+        const gone = new Set(ids);
+        const tabs = s.tabs.filter((id) => !gone.has(id));
+        const v = s.view;
+        if (v.kind !== "canvas" || !gone.has(v.canvasId)) return { tabs };
+        const i = s.tabs.indexOf(v.canvasId);
+        const next = s.tabs.slice(i + 1).find((id) => !gone.has(id)) ?? s.tabs.slice(0, Math.max(i, 0)).reverse().find((id) => !gone.has(id));
+        const meta = s.canvases.find((c) => c.id === v.canvasId);
+        const view: View = next
+          ? { kind: "canvas", canvasId: next }
+          : meta
+            ? { kind: "project", projectId: meta.projectId }
+            : { kind: "recent" };
+        return { tabs, view };
+      }),
+
+    cycleTab(delta) {
+      const { tabs, view, navigate } = get();
+      if (tabs.length === 0) return;
+      const at = view.kind === "canvas" ? tabs.indexOf(view.canvasId) : -1;
+      const next = at < 0 ? (delta > 0 ? 0 : tabs.length - 1) : (at + delta + tabs.length) % tabs.length;
+      navigate({ kind: "canvas", canvasId: tabs[next] });
+    },
     setSearchOpen: (searchOpen) => set({ searchOpen }),
     toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
     toggleMinimap: () =>
@@ -163,7 +243,8 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     async createCanvas(projectId, title = t("未命名画布")) {
       const meta = await backend.createCanvas(projectId, title);
-      set((s) => ({ canvases: [...s.canvases, meta], view: { kind: "canvas", canvasId: meta.id } }));
+      set((s) => ({ canvases: [...s.canvases, meta] }));
+      get().navigate({ kind: "canvas", canvasId: meta.id });
       return meta;
     },
 
@@ -175,13 +256,9 @@ export const useAppStore = create<AppState>()((set, get) => {
     async deleteCanvas(id) {
       const meta = get().canvases.find((c) => c.id === id);
       await backend.deleteCanvas(id);
-      set((s) => ({
-        canvases: s.canvases.filter((c) => c.id !== id),
-        view:
-          s.view.kind === "canvas" && s.view.canvasId === id && meta
-            ? { kind: "project", projectId: meta.projectId }
-            : s.view,
-      }));
+      if (meta) get().showToast(t("已把「{name}」移到回收站", { name: meta.title }));
+      get().closeTabs([id]);
+      set((s) => ({ canvases: s.canvases.filter((c) => c.id !== id) }));
     },
 
     canvasSaved(meta) {
@@ -200,4 +277,11 @@ export const useAppStore = create<AppState>()((set, get) => {
       set({ assets: toMap(await backend.listAssets()) });
     },
   };
+});
+
+// 标签页变化时保存；当前不在画布页时沿用上次记下的活动标签页
+useAppStore.subscribe((s, prev) => {
+  if (!s.workspace || (s.tabs === prev.tabs && s.view === prev.view)) return;
+  const active = s.view.kind === "canvas" ? s.view.canvasId : readTabs(s.workspace).active;
+  writeTabs(s.workspace, { tabs: s.tabs, active: active && s.tabs.includes(active) ? active : null });
 });

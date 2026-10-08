@@ -1,22 +1,26 @@
-import { CalendarDays, Clock, FolderOpen, Inbox, Info, Languages, Library, Plus, Search } from "lucide-react";
+import { CalendarDays, Clock, Inbox, Library, Plus, Search, Settings, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { openAbout } from "@/features/about/AboutDialog";
 import { openContextMenu } from "@/features/menu/ContextMenu";
 import { projectMenu } from "@/features/menu/menus";
 import { ProjectIcon } from "@/features/project/projectIcons";
-import { setLocale, useLocale, useT } from "@/i18n";
+import { useT } from "@/i18n";
+import { displayCombo } from "@/lib/shortcuts";
+import { useUpdater } from "@/services/updater";
+import { shortcutOf, useSettings } from "@/store/settingsStore";
 import { inboxOf, useAppStore, type View } from "@/store/appStore";
 import type { ID } from "@/types/model";
 import { useCanvasDrag } from "./canvasDrag";
+import { Splitter } from "./Splitter";
 
 export function Sidebar() {
   const t = useT();
-  const locale = useLocale((s) => s.locale);
+  const shortcuts = useSettings((s) => s.shortcuts);
+  const updateReady = useUpdater((s) => s.status.kind === "available");
   const projects = useAppStore((s) => s.projects);
   const canvases = useAppStore((s) => s.canvases);
   const view = useAppStore((s) => s.view);
   const navigate = useAppStore((s) => s.navigate);
-  const dropOver = useCanvasDrag((s) => s.drag?.overProjectId ?? null);
+  const dropOver = useCanvasDrag((s) => s.drag?.over ?? null);
   const dragging = useCanvasDrag((s) => s.drag !== null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -29,7 +33,8 @@ export function Sidebar() {
   const is = (kind: View["kind"]) => view.kind === kind;
   /** 项目条目同时是画布拖放的目标 */
   const projectClass = (id: ID) =>
-    `nav-item${currentProjectId === id ? " is-active" : ""}${dragging ? " is-drop-target" : ""}${dropOver === id ? " is-drop-over" : ""}`;
+    `nav-item${currentProjectId === id ? " is-active" : ""}${dragging ? " is-drop-target" : ""}${dropOver?.kind === "project" && dropOver.id === id ? " is-drop-over" : ""}`;
+  const keyHint = (combo: string | null) => (combo ? ` (${displayCombo(combo)})` : "");
 
   const submit = async () => {
     const trimmed = name.trim();
@@ -43,23 +48,20 @@ export function Sidebar() {
       <div className="sidebar-head">
         <img src="/lattira.svg" alt="" width={22} height={22} />
         <div className="brand">{t("栖页")}</div>
-        <button className="icon-btn head-btn" onClick={openAbout} title={t("关于")}>
-          <Info size={15} />
-        </button>
         <button
-          className="icon-btn head-btn lang-btn"
-          onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
-          title={locale === "zh" ? "Switch to English" : "切换到中文"}
+          className={`icon-btn head-btn${is("settings") ? " is-on" : ""}`}
+          onClick={() => navigate({ kind: "settings" })}
+          title={(updateReady ? t("有新版本可以更新") + "\n" : "") + t("设置") + keyHint(shortcutOf("settings", shortcuts))}
         >
-          <Languages size={15} />
-          <span>{locale === "zh" ? "EN" : "中"}</span>
+          <Settings size={16} />
+          {updateReady && <span className="badge-dot" />}
         </button>
       </div>
 
       <button className="nav-item search-trigger" onClick={() => useAppStore.getState().setSearchOpen(true)}>
         <Search size={16} />
         <span>{t("搜索")}</span>
-        <kbd>Ctrl E</kbd>
+        {shortcutOf("search", shortcuts) && <kbd>{displayCombo(shortcutOf("search", shortcuts)!).replaceAll("+", " ")}</kbd>}
       </button>
 
       <button className={`nav-item${is("recent") ? " is-active" : ""}`} onClick={() => navigate({ kind: "recent" })}>
@@ -127,10 +129,16 @@ export function Sidebar() {
         {userProjects.length === 0 && !creating && <p className="nav-empty">{t("还没有项目，点 + 新建一个")}</p>}
       </div>
 
-      <button className="nav-item ws-switch" onClick={() => void useAppStore.getState().pickWorkspace()}>
-        <FolderOpen size={16} />
-        <span>{t("切换工作区")}</span>
+      <button
+        className={`nav-item trash-link${is("trash") ? " is-active" : ""}${dragging ? " is-drop-target" : ""}${dropOver?.kind === "trash" ? " is-drop-over" : ""}`}
+        data-drop-trash
+        onClick={() => navigate({ kind: "trash" })}
+        title={t("把画布拖到这里即可删除")}
+      >
+        <Trash2 size={16} />
+        <span>{t("回收站")}</span>
       </button>
+      <Splitter panel="sidebar" edge="right" />
     </nav>
   );
 }

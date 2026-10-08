@@ -85,6 +85,22 @@ ALTER TABLE canvases ADD COLUMN preview TEXT;
 "#, r#"
 -- 项目图标（图标名），为空时显示圆点
 ALTER TABLE projects ADD COLUMN icon TEXT;
+"#, r#"
+-- 回收站里的文件：删除时从 assets 移到这里，恢复时再移回去
+CREATE TABLE trashed_assets (
+    id            TEXT PRIMARY KEY,
+    hash          TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    mime          TEXT NOT NULL,
+    size          INTEGER NOT NULL,
+    width         INTEGER,
+    height        INTEGER,
+    imported_at   INTEGER NOT NULL,
+    ocr_text      TEXT,
+    original_path TEXT NOT NULL,            -- 删除前的位置，恢复时尽量放回原处；空串表示未知
+    trash_file    TEXT NOT NULL,            -- 回收站中的文件，相对工作区根目录
+    deleted_at    INTEGER NOT NULL
+);
 "#];
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {

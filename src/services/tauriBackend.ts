@@ -1,7 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { Asset, CanvasDay, CanvasMeta, ImportNode, Project, SearchHit, WorkspaceInfo } from "@/types/model";
+import type { Asset, CanvasDay, CanvasMeta, ImportNode, Project, SearchHit, TrashItem, WorkspaceInfo } from "@/types/model";
 import { t } from "@/i18n";
 import type { Backend, ClipboardContent } from "./backend";
 
@@ -83,6 +83,32 @@ export function createTauriBackend(): Backend {
         stop?.();
       };
     },
+
+    async exportCanvas(canvas) {
+      const dest = await save({
+        title: t("导出画布"),
+        defaultPath: `${canvas.title.replace(/[<>:"/\\|?*]/g, "_")}.zip`,
+        filters: [{ name: t("画布包"), extensions: ["zip"] }],
+      });
+      if (!dest) return false;
+      await invoke<void>("export_canvas", { id: canvas.id, dest });
+      return true;
+    },
+    async importCanvases(projectId) {
+      const picked = await open({
+        title: t("导入画布"),
+        multiple: true,
+        filters: [{ name: t("画布包或 JSON Canvas"), extensions: ["zip", "canvas"] }],
+      });
+      const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
+      if (paths.length === 0) return [];
+      return invoke<CanvasMeta[]>("import_canvases", { projectId, paths });
+    },
+
+    listTrash: () => invoke<TrashItem[]>("list_trash"),
+    restoreTrash: (items) => invoke<{ canvases: CanvasMeta[]; assets: Asset[] }>("restore_trash", { items }),
+    purgeTrash: (items) => invoke<void>("purge_trash", { items }),
+    emptyTrash: () => invoke<void>("empty_trash"),
 
     calendarDays: (from, to) => invoke<CanvasDay[]>("calendar_days", { from, to }),
     search: (query) => invoke<SearchHit[]>("search", { query }),

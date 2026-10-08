@@ -2,7 +2,8 @@
  * 画布文件格式：兼容 JSON Canvas 1.0（https://jsoncanvas.org），
  * 栖页独有的信息放在 `lattira` 扩展字段中，Obsidian 等工具打开时会忽略它们。
  */
-import type { Asset, CanvasDoc, CanvasElement, CardColor, Edge, ID } from "@/types/model";
+import { boundsOf } from "@/lib/geometry";
+import type { Asset, CanvasDoc, CanvasElement, CardColor, Edge, ID, Viewport } from "@/types/model";
 
 interface JsonCanvasNode {
   id: string;
@@ -88,6 +89,12 @@ export function toJsonCanvas(doc: CanvasDoc, assets: ReadonlyMap<ID, Asset>): st
   return JSON.stringify(file, null, 2);
 }
 
+/** 没有保存视口的画布（导入的、其他工具编辑过的）：内容左上角留一点边距显示 */
+function frameContent(elements: CanvasElement[]): Viewport {
+  const b = boundsOf(elements);
+  return b ? { x: 80 - b.x, y: 80 - b.y, zoom: 1 } : { x: 0, y: 0, zoom: 1 };
+}
+
 export function fromJsonCanvas(json: string, canvasId: ID): CanvasDoc {
   const empty: CanvasDoc = { canvasId, elements: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } };
   if (!json.trim()) return empty;
@@ -121,5 +128,5 @@ export function fromJsonCanvas(json: string, canvasId: ID): CanvasDoc {
   const edges: Edge[] = (file.edges ?? [])
     .filter((e) => ids.has(e.fromNode) && ids.has(e.toNode))
     .map((e) => ({ id: e.id, fromId: e.fromNode, toId: e.toNode, label: e.label }));
-  return { canvasId, elements, edges, viewport: file.lattira?.viewport ?? empty.viewport };
+  return { canvasId, elements, edges, viewport: file.lattira?.viewport ?? frameContent(elements) };
 }

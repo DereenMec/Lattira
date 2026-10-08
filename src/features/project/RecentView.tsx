@@ -1,15 +1,17 @@
-import { Clock, Plus } from "lucide-react";
+import { Clock } from "lucide-react";
 import { useMemo } from "react";
 import { addDays, toLocalDate } from "@/lib/date";
 import { msg, useT } from "@/i18n";
 import { inboxOf, useAppStore } from "@/store/appStore";
 import type { CanvasMeta } from "@/types/model";
 import { CanvasCard } from "./CanvasCard";
+import { CanvasListActions } from "./CanvasListActions";
 
 /** 最近编辑过的画布，按时间降序，分组显示 */
 export function RecentView() {
   const t = useT();
   const canvases = useAppStore((s) => s.canvases);
+  const inbox = useAppStore((s) => inboxOf(s.projects));
 
   const groups = useMemo(() => {
     const today = new Date();
@@ -30,22 +32,14 @@ export function RecentView() {
     return buckets.filter((b) => b.items.length > 0);
   }, [canvases]);
 
-  /** 新画布放进「未分类」，之后可以拖到某个项目 */
-  const newCanvas = async () => {
-    const app = useAppStore.getState();
-    const inbox = inboxOf(app.projects);
-    if (inbox) await app.createCanvas(inbox.id);
-  };
-
   return (
     <div className="page project-page">
       <header className="page-head">
         <h1>{t("最近")}</h1>
         <span className="page-sub">{t("{n} 个画布", { n: canvases.length })}</span>
         <div className="page-actions">
-          <button className="btn primary" onClick={() => void newCanvas()} title={t("新画布放在「未分类」里")}>
-            <Plus size={14} /> {t("新建画布")}
-          </button>
+          {/* 新建和导入的画布放进「未分类」，之后可以拖到某个项目 */}
+          {inbox && <CanvasListActions projectId={inbox.id} intoInbox />}
         </div>
       </header>
       <p className="page-desc">{t("所有项目里的画布，按最后编辑时间从近到远排列。")}</p>

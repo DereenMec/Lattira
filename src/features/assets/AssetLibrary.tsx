@@ -9,7 +9,7 @@ import { fileExtension, formatBytes, isImageMime } from "@/lib/format";
 import { backend } from "@/services/backend";
 import { confirmAction } from "@/services/confirm";
 import { useAppStore } from "@/store/appStore";
-import { useCanvasStore } from "@/store/canvasStore";
+import { dropCanvasCache, useCanvasStore } from "@/store/canvasStore";
 import type { Asset, ID } from "@/types/model";
 
 type Filter = "all" | "image" | "document" | "unused";
@@ -139,12 +139,13 @@ export function AssetLibrary() {
     const note = referenced
       ? t("其中 {n} 个文件被画布引用，对应的卡片也会从画布上移除。", { n: referenced })
       : t("这些文件没有被任何画布引用。");
-    if (!(await confirmAction(t("删除{name}？\n{note}\n文件会移到工作区的回收站文件夹（.lattira/trash/assets）。", { name, note })))) return;
+    if (!(await confirmAction(t("删除{name}？\n{note}\n文件会移到回收站，之后可以恢复。", { name, note })))) return;
     try {
       // 先把正在编辑的画布写盘，删除后再重新读取，避免旧内容覆盖
       const canvas = useCanvasStore.getState();
       await canvas.flush();
       const res = await backend.deleteAssets(targets.map((a) => a.id));
+      dropCanvasCache(res.canvasIds);
       const [fresh, canvases] = await Promise.all([backend.listAssets(), backend.listCanvases()]);
       useAppStore.setState({ assets: new Map(fresh.map((a) => [a.id, a])), canvases });
       if (canvas.doc && res.canvasIds.includes(canvas.doc.canvasId)) await canvas.load(canvas.doc.canvasId);

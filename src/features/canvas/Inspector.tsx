@@ -1,4 +1,4 @@
-import { ExternalLink, LocateFixed } from "lucide-react";
+import { ArrowUpRight, ExternalLink, LocateFixed } from "lucide-react";
 import { useMemo } from "react";
 import { openContextMenu } from "@/features/menu/ContextMenu";
 import { assetEntries } from "@/features/menu/menus";
@@ -9,11 +9,15 @@ import { formatBytes, isImageMime, isOcrMime } from "@/lib/format";
 import { backend } from "@/services/backend";
 import { projectLabel, useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
+import { useSettings } from "@/store/settingsStore";
 import { CARD_COLORS, type Asset, type CanvasMeta, type CardColor, type ID } from "@/types/model";
 
 const TYPE_LABEL = { text: msg("文本卡片"), image: msg("图片"), file: msg("文件"), section: msg("文件夹") } as const;
 
-/** 当前画布引用的全部文件与图片；单击定位到卡片，双击打开，右键更多操作 */
+/**
+ * 当前画布引用的全部文件与图片；单击定位到卡片，双击打开，右键更多操作。
+ * 单击只定位、不选中：选中卡片会让检查器切换到卡片属性，列表随之消失，双击的第二下就点不到了。
+ */
 function CanvasFileList() {
   const t = useT();
   const elements = useCanvasStore((s) => s.doc?.elements);
@@ -48,7 +52,7 @@ function CanvasFileList() {
             <li key={asset.id}>
               <button
                 title={`${asset.name}\n${t("单击定位 · 双击打开 · 右键更多")}`}
-                onClick={() => useCanvasStore.getState().requestFocus(elementIds[0])}
+                onClick={() => useCanvasStore.getState().requestFocus(elementIds[0], { select: false })}
                 onDoubleClick={() => void backend.openAsset(asset)}
                 onContextMenu={(e) =>
                   openContextMenu(e, [
@@ -81,8 +85,10 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
   const selectedEdgeId = useCanvasStore((s) => s.selectedEdgeId);
   const assets = useAppStore((s) => s.assets);
   const projects = useAppStore((s) => s.projects);
+  const width = useSettings((s) => s.inspectorWidth);
 
-  if (!doc) return <aside className="inspector" />;
+  if (!doc) return <aside className="inspector" style={{ width }} />;
+  const { updateCanvas, navigate, showToast } = useAppStore.getState();
   const selected = doc.elements.filter((e) => selectedIds.includes(e.id));
   const colorable = selected.filter((e) => e.type === "text" || e.type === "section");
 
@@ -90,16 +96,34 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
     useCanvasStore.getState().updateElements(Object.fromEntries(colorable.map((e) => [e.id, { color }])));
 
   return (
-    <aside className="inspector">
+    <aside className="inspector" style={{ width }}>
       {selected.length === 0 && !selectedEdgeId && (
         <section>
           <h3>{t("画布")}</h3>
           <dl className="props">
             <dt>{t("所属项目")}</dt>
-            <dd>{(() => {
-              const p = projects.find((x) => x.id === meta.projectId);
-              return p ? projectLabel(p) : "";
-            })()}</dd>
+            <dd className="project-field">
+              <select
+                value={meta.projectId}
+                title={t("移到其他项目")}
+                onChange={(e) =>
+                  void updateCanvas(meta.id, { projectId: e.target.value }).catch((err) =>
+                    showToast(t("移动失败：{error}", { error: String(err) })),
+                  )
+                }
+              >
+                {projects
+                  .filter((p) => !p.archived || p.id === meta.projectId)
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {projectLabel(p)}
+                    </option>
+                  ))}
+              </select>
+              <button className="icon-btn" title={t("打开项目")} onClick={() => navigate({ kind: "project", projectId: meta.projectId })}>
+                <ArrowUpRight size={14} />
+              </button>
+            </dd>
             <dt>{t("元素")}</dt>
             <dd>{t("{n} 个", { n: doc.elements.length })}</dd>
             <dt>{t("连线")}</dt>

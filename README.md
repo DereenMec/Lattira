@@ -1,6 +1,6 @@
 # 栖页 · Lattira
 
-By z00613494
+By Dereen
 
 画布式的个人知识库与文件管理工具：文本、文件和图片都是画布上的卡片，画布按项目归档，也能在日历中按编辑日期回溯。仅支持 Windows 桌面端。
 
@@ -46,12 +46,16 @@ src/
 │  ├─ tauriBackend.ts      桌面端实现：调用 Rust 命令
 │  └─ browserBackend.ts    浏览器预览实现：localStorage
 ├─ store/
-│  ├─ appStore.ts          工作区、项目、画布列表、导航
-│  └─ canvasStore.ts       当前画布：编辑、撤销/重做、自动保存、变化统计
-└─ features/               canvas / calendar / project / assets / search / layout / workspace
+│  ├─ appStore.ts          工作区、项目、画布列表、导航、标签页
+│  ├─ canvasStore.ts       当前画布：编辑、撤销/重做、自动保存、变化统计；后台标签页的画布缓存
+│  └─ settingsStore.ts     设置：快捷键、关闭窗口时的行为
+└─ features/               canvas / calendar / project / assets / search / trash / settings / layout / workspace
 
 src-tauri/src/
-├─ commands.rs             全部前端命令：项目、画布、资源导入、日历、搜索
+├─ commands.rs             前端命令：项目、画布、资源导入、日历、搜索
+├─ trash.rs                回收站：列出、恢复、永久删除
+├─ desktop.rs              托盘、关闭时最小化到托盘、呼出主界面的全局快捷键
+├─ transfer.rs             画布导出为画布包（.zip）与导入（画布包或 .canvas）
 ├─ ocr.rs                  图片文字识别（后台线程，结果用于搜索）
 ├─ workspace.rs            工作区的打开与初始化、应用设置
 ├─ db.rs                   SQLite 表结构与迁移
@@ -64,7 +68,7 @@ src-tauri/src/
 我的工作区/
 ├─ .lattira/
 │  ├─ lattira.db           元数据、搜索索引、编辑记录（日历数据）
-│  └─ trash/               删除的画布
+│  └─ trash/               回收站：删除的画布（<id>.canvas）与文件（assets/）
 ├─ projects/
 │  ├─ 未分类/
 │  └─ 竞品分析/竞品对比.canvas
@@ -98,7 +102,34 @@ src-tauri/src/
 - [x] 项目图标与颜色：28 种图标、16 种预设颜色和自定义取色
 - [x] 文件夹：工具栏一个按钮即可新建空文件夹、把选中的卡片放进文件夹（Ctrl+G），或从电脑导入；导入时文件按网格紧凑排列（列数让宽高比接近 2:1），子文件夹成为嵌套文件夹
 - [x] 重命名文件（磁盘上的文件一起改名）
-- [x] 中英文界面切换、关于界面（版本、工作区信息、更新内容）
+- [x] 设置页（左上角齿轮，Ctrl+,）：外观（跟随系统 / 浅色 / 深色）、界面语言、关闭窗口时的行为、工作区信息与切换、自定义快捷键、关于与在线更新
+- [x] 在线更新：启动时在后台检查 GitHub Release，有新版本时设置按钮出现小圆点，在「关于」中下载安装并自动重启
+- [x] 左侧栏与右侧检查器可拖动边缘调整宽度（双击恢复默认）；画布页不再单独占一行顶栏，画布操作放在标签栏右端
+- [x] 回收站：删除的画布和文件可以恢复（画布回到原项目，文件尽量放回原位置）或永久删除、清空
+- [x] 多标签页：同时打开多个画布，切换时保留各自的撤销历史；双击标签页改名，Ctrl+W 关闭、Ctrl+Tab 切换，下次启动时恢复
+- [x] Ctrl+1～4 依次打开侧栏的最近、未分类、日历、资源库
+- [x] 关闭窗口时最小化到托盘；全局快捷键 Ctrl+Shift+L 呼出主界面；再次启动程序时调出已运行的窗口
+- [x] 把画布卡片或标签页拖到侧栏「回收站」上即可删除
+- [x] 画布导出为画布包（.zip，含画布引用的文件，解压后 Obsidian 也能打开）；导入画布包或单独的 .canvas 文件（如 Obsidian 画布，引用的文件会复制进工作区）
+
+## 发布
+
+在线更新从 GitHub Release 的 `latest.json` 读取新版本（地址见 `src-tauri/tauri.conf.json` 的 `plugins.updater`），
+安装包必须用更新签名私钥签名，否则客户端会拒绝安装。私钥在 `%USERPROFILE%\.tauri\lattira.key`，**不要提交到仓库，并备份好**：
+丢失后已安装的客户端将无法再在线更新（只能重新生成密钥、更换 `pubkey`，再让用户手动安装一次）。
+
+```powershell
+# 1. 改版本号：package.json、src-tauri/Cargo.toml、src-tauri/tauri.conf.json
+# 2. 带私钥构建，会额外生成 .sig 签名文件
+$env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.tauri\lattira.key"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+npm run tauri build
+# 3. 生成 latest.json（可选：附上更新说明文件，会显示在「关于」的更新提示里）
+npm run release:manifest -- notes.md
+# 4. 新建 Release vX.Y.Z，上传 src-tauri/target/release/bundle/nsis/ 下的安装包和 latest.json
+```
+
+客户端请求的是「最新 Release」里的 `latest.json`，所以每个版本都要上传它；早于 0.4.0 的版本没有在线更新，需要手动安装一次。
 
 ## 性能验证
 
@@ -116,6 +147,5 @@ src-tauri/src/
 
 ## 待完成
 
-- [ ] 回收站界面（删除的画布已保存在 `.lattira/trash/`）
 - [ ] 文件卡片的内置预览（PDF 等）
 - [ ] 大画布：越过预渲染区域时分批挂载

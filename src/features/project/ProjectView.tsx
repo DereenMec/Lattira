@@ -5,6 +5,7 @@ import { useT } from "@/i18n";
 import { useAppStore } from "@/store/appStore";
 import type { ID } from "@/types/model";
 import { CanvasCard } from "./CanvasCard";
+import { CanvasListActions } from "./CanvasListActions";
 import { ProjectIcon } from "./projectIcons";
 import { openProjectStyle } from "./ProjectStyleDialog";
 
@@ -59,9 +60,7 @@ export function ProjectView({ projectId }: { projectId: ID }) {
               <Archive size={14} /> {t("归档")}
             </button>
           )}
-          <button className="btn primary" onClick={() => void createCanvas(project.id)}>
-            <Plus size={14} /> {t("新建画布")}
-          </button>
+          <CanvasListActions projectId={project.id} />
         </div>
       </header>
       {project.isInbox && <p className="page-desc">{t("没有归到任何项目的画布放在这里。把画布卡片拖到左侧的项目上，就能移过去。")}</p>}
