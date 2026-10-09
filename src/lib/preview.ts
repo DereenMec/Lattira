@@ -30,7 +30,8 @@ export interface CanvasPreview {
   edges: [number, number][];
 }
 
-const TYPE_CODE = { text: "x", image: "i", file: "f", section: "s" } as const;
+/** 链接在缩略图里和文件一样画成带标题的卡片 */
+const TYPE_CODE = { text: "x", image: "i", file: "f", link: "f", section: "s" } as const;
 
 const firstLine = (s: string) => (s.split("\n").find((l) => l.trim()) ?? "").trim().slice(0, MAX_LABEL);
 
@@ -49,6 +50,7 @@ export function buildPreview(doc: CanvasDoc, assets: ReadonlyMap<ID, Asset>): st
     if (el.type === "text") item.l = firstLine(el.text);
     else if (el.type === "section") item.l = firstLine(el.label);
     else if (el.type === "file") item.l = (assets.get(el.assetId)?.name ?? "").slice(0, MAX_LABEL);
+    else if (el.type === "link") item.l = firstLine(el.title || el.url);
     else item.a = el.assetId;
     return item;
   });

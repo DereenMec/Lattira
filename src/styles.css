@@ -29,6 +29,9 @@
   --accent-ink: #ffffff;
   --accent-soft: rgba(47, 93, 80, 0.12);
   --select: #2f7d6b;
+  --snap: #e0457b;
+  --hit: #fde68a;
+  --hit-current: #fbbf24;
   --warn: #b45309;
   --danger: #b91c1c;
   --shadow: 0 1px 2px rgba(31, 36, 33, 0.06), 0 4px 16px rgba(31, 36, 33, 0.06);
@@ -70,6 +73,9 @@
     --accent-ink: #0f1a16;
     --accent-soft: rgba(111, 179, 159, 0.16);
     --select: #6fb39f;
+    --snap: #f06a98;
+    --hit: rgba(250, 204, 21, 0.28);
+    --hit-current: rgba(250, 204, 21, 0.55);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.25);
     --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.5);
 
@@ -99,6 +105,9 @@
   --accent-ink: #0f1a16;
   --accent-soft: rgba(111, 179, 159, 0.16);
   --select: #6fb39f;
+  --snap: #f06a98;
+  --hit: rgba(250, 204, 21, 0.28);
+  --hit-current: rgba(250, 204, 21, 0.55);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.25);
   --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.5);
 
@@ -657,6 +666,80 @@ kbd {
   color: var(--ink-3);
 }
 
+.el-link {
+  overflow: hidden;
+}
+.el-link-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.link-image {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.link-meta {
+  flex: none;
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+  padding: 10px 14px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.link-title {
+  font-weight: 600;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.link-desc {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.link-url {
+  -webkit-line-clamp: 1;
+  word-break: break-all;
+  color: var(--ink-3);
+}
+.link-site {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-3);
+  min-width: 0;
+}
+.link-site span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  object-fit: contain;
+}
+
 .el-section {
   background: color-mix(in srgb, var(--accent) 5%, transparent);
   border: 1.5px dashed var(--line-strong);
@@ -673,6 +756,14 @@ kbd {
 }
 .el-section .handle-resize {
   pointer-events: auto;
+}
+.el-section.is-drop-target {
+  border: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.el-section.is-drop-target .el-section-label {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .el-section-label {
   position: absolute;
@@ -758,6 +849,15 @@ kbd {
 }
 .edge-arrow.is-selected {
   fill: var(--select);
+}
+
+/* 拖动时的对齐参考线；粗细由行内样式按缩放换算成 1 个屏幕像素 */
+.snap-guide {
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: var(--snap);
+  pointer-events: none;
 }
 
 .marquee {
@@ -1369,12 +1469,27 @@ body.is-dragging-canvas * {
   box-shadow: 0 0 0 3px var(--card-yellow), 0 0 0 4px var(--warn), var(--shadow);
 }
 
+/* 搜索与查找命中的文字 */
+mark.hit {
+  background: var(--hit);
+  color: inherit;
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.el.is-current-match mark.hit {
+  background: var(--hit-current);
+}
+
 /* ---------- 右键菜单 ---------- */
 .ctx-menu {
   position: fixed;
   z-index: 80;
   min-width: 200px;
   max-width: 300px;
+  /* 文件夹很多时「移到文件夹」的子菜单可以滚动 */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   padding: 5px;
   border-radius: 10px;
   background: var(--surface);
@@ -2366,4 +2481,90 @@ body.is-resizing * {
   border-radius: 50%;
   background: var(--danger);
   box-shadow: 0 0 0 2px var(--panel);
+}
+
+/* ---------- 检查器：链接卡片 ---------- */
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.link-inspector-desc {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  word-break: break-word;
+}
+
+/* ---------- 导入进度 ---------- */
+.import-progress {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 60;
+  pointer-events: none;
+}
+.import-row {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
+}
+.import-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.import-head .spin {
+  color: var(--accent);
+  flex: none;
+}
+.import-title {
+  flex: 1;
+  min-width: 0;
+}
+.import-percent {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.import-current {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-bar {
+  margin-top: 10px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent-soft);
+  overflow: hidden;
+}
+.import-bar > div {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.2s ease-out;
+}
+.import-bar.is-indeterminate > div {
+  width: 35%;
+  animation: import-slide 1.2s ease-in-out infinite;
+}
+@keyframes import-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
 }

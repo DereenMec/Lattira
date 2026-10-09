@@ -41,7 +41,7 @@ export interface CanvasMeta {
   preview?: string | null;
 }
 
-export type ElementType = "text" | "image" | "file" | "section";
+export type ElementType = "text" | "image" | "file" | "link" | "section";
 
 export const CARD_COLORS = ["default", "red", "orange", "yellow", "green", "blue", "purple"] as const;
 export type CardColor = (typeof CARD_COLORS)[number];
@@ -73,13 +73,35 @@ export interface FileElement extends ElementBase {
   assetId: ID;
 }
 
+/** 网页链接：标题、简介、预览图和网站图标在放到画布上时获取，图片缓存在工作区的 .lattira/links/ 下 */
+export interface LinkElement extends ElementBase {
+  type: "link";
+  url: string;
+  title?: string;
+  description?: string;
+  siteName?: string;
+  /** 预览图，相对工作区根目录的路径 */
+  image?: string;
+  /** 网站图标，相对工作区根目录的路径 */
+  icon?: string;
+}
+
+/** 获取到的网页信息，与 src-tauri/src/link.rs 的 LinkPreview 对应 */
+export interface LinkPreview {
+  title?: string | null;
+  description?: string | null;
+  siteName?: string | null;
+  image?: string | null;
+  icon?: string | null;
+}
+
 /** 分组框：带标题的区域，拖动时带着框内元素一起移动 */
 export interface SectionElement extends ElementBase {
   type: "section";
   label: string;
 }
 
-export type CanvasElement = TextElement | ImageElement | FileElement | SectionElement;
+export type CanvasElement = TextElement | ImageElement | FileElement | LinkElement | SectionElement;
 
 export interface Edge {
   id: ID;

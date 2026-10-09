@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { boundsOf } from "@/lib/geometry";
+import { boundsOf, contains, growSections, SECTION_PAD, SECTION_TOP, withContents } from "@/lib/geometry";
 import { uuidv7 } from "@/lib/id";
 import { fromJsonCanvas, toJsonCanvas } from "@/lib/jsonCanvas";
 import { buildPreview } from "@/lib/preview";
@@ -13,6 +13,7 @@ import type {
   ChangeSummary,
   Edge,
   ID,
+  LinkElement,
   SectionElement,
   Viewport,
 } from "@/types/model";
@@ -25,7 +26,9 @@ interface Snapshot {
   edges: Edge[];
 }
 
-type ElementPatch = Partial<Omit<CanvasElement, "id" | "type">> & { text?: string; label?: string };
+type ElementPatch = Partial<Omit<CanvasElement, "id" | "type">> & { text?: string; label?: string } & Partial<
+  Omit<LinkElement, "id" | "type">
+>;
 
 type SaveState = "saved" | "pending" | "saving" | "error";
 
@@ -60,12 +63,19 @@ interface CanvasState {
   /** 粘贴：一次插入一批元素和它们之间的连线，并选中这些元素 */
   insertCards(elements: CanvasElement[], edges: Edge[]): void;
   updateElements(patches: Record<ID, ElementPatch>): void;
+  /**
+   * 后台补充的信息（如链接预览）：不进撤销历史，同时补到历史快照里，撤销其他操作时不会丢。
+   * 画布不在编辑中时改写后台标签页的缓存或磁盘上的文件。
+   */
+  patchQuietly(canvasId: ID, patches: Record<ID, ElementPatch>): Promise<void>;
   deleteSelection(): void;
   addEdge(fromId: ID, toId: ID): void;
   reverseEdge(id: ID): void;
   groupSelection(): void;
   /** 删除分组框，保留框内元素 */
   ungroup(sectionId: ID): void;
+  /** 把元素（连同选中的文件夹里的内容）放进文件夹：排在已有内容下方，文件夹不够大时自动变大 */
+  moveIntoSection(ids: ID[], sectionId: ID): void;
   /** 创建副本，偏移一点放置，并复制它们之间的连线 */
   duplicate(ids: ID[]): void;
   /** 调整叠放次序（分组框始终在普通卡片之下） */
@@ -141,9 +151,22 @@ function indexOf(doc: CanvasDoc, assets: ReadonlyMap<ID, Asset>): CanvasIndex {
   for (const el of doc.elements) {
     if (el.type === "text" && el.text.trim()) texts.push({ elementId: el.id, text: el.text });
     if (el.type === "section" && el.label.trim()) texts.push({ elementId: el.id, text: el.label });
+    if (el.type === "link") texts.push({ elementId: el.id, text: linkText(el) });
     if (el.type === "image" || el.type === "file") assetIds.add(el.assetId);
   }
   return { elementCount: doc.elements.length, texts, assetIds: [...assetIds], preview: buildPreview(doc, assets) };
+}
+
+/** 链接卡片可被搜索的文字：标题、网址、网站名、简介 */
+export const linkText = (el: LinkElement) => [el.title, el.url, el.siteName, el.description].filter(Boolean).join("\n");
+
+/** 历史快照里的同一元素也打上补丁 */
+function patchSnapshots(list: Snapshot[], patches: Record<ID, ElementPatch>): Snapshot[] {
+  return list.map((snap) =>
+    snap.elements.some((e) => patches[e.id])
+      ? { ...snap, elements: snap.elements.map((e) => (patches[e.id] ? ({ ...e, ...patches[e.id] } as CanvasElement) : e)) }
+      : snap,
+  );
 }
 
 function applyPatches(elements: CanvasElement[], patches: Record<ID, ElementPatch>, now: number): CanvasElement[] {
@@ -312,6 +335,36 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       commit((s) => ({ ...s, elements: applyPatches(s.elements, patches, now) }));
     },
 
+    async patchQuietly(canvasId, patches) {
+      const { doc } = get();
+      if (doc?.canvasId === canvasId) {
+        if (!doc.elements.some((e) => patches[e.id])) return;
+        past = patchSnapshots(past, patches);
+        future = patchSnapshots(future, patches);
+        if (gestureBase) gestureBase = patchSnapshots([gestureBase], patches)[0];
+        set({ doc: { ...doc, elements: applyPatches(doc.elements, patches, Date.now()) } });
+        scheduleSave();
+        return;
+      }
+      const cached = cache.get(canvasId);
+      const target = cached?.doc ?? fromJsonCanvas(await backend.loadCanvas(canvasId), canvasId);
+      if (!target.elements.some((e) => patches[e.id])) return;
+      const next = { ...target, elements: applyPatches(target.elements, patches, Date.now()) };
+      if (cached) {
+        cached.doc = next;
+        cached.past = patchSnapshots(cached.past, patches);
+        cached.future = patchSnapshots(cached.future, patches);
+      }
+      const { assets } = useAppStore.getState();
+      const viewport = cached?.viewport ?? next.viewport;
+      const meta = await backend.saveCanvas(canvasId, toJsonCanvas({ ...next, viewport }, assets), indexOf(next, assets), {
+        added: 0,
+        modified: 1,
+        removed: 0,
+      });
+      useAppStore.getState().canvasSaved(meta);
+    },
+
     deleteSelection() {
       const { selectedIds, selectedEdgeId } = get();
       if (selectedEdgeId) {
@@ -347,6 +400,25 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
     ungroup(sectionId) {
       commit((s) => ({ ...s, elements: s.elements.filter((e) => e.id !== sectionId) }));
       set({ selectedIds: [] });
+    },
+
+    moveIntoSection(ids, sectionId) {
+      const { doc } = get();
+      const section = doc?.elements.find((e) => e.id === sectionId);
+      if (!doc || !section) return;
+      const moving = withContents(doc.elements, ids);
+      moving.delete(sectionId);
+      const els = doc.elements.filter((e) => moving.has(e.id));
+      const box = boundsOf(els);
+      if (!box) return;
+      const inside = doc.elements.filter((e) => e.id !== sectionId && !moving.has(e.id) && contains(section, e));
+      const top = inside.length ? Math.max(...inside.map((e) => e.y + e.height)) + SECTION_PAD : section.y + SECTION_TOP;
+      const dx = section.x + SECTION_PAD - box.x;
+      const dy = top - box.y;
+      const patches: Record<ID, ElementPatch> = {};
+      for (const e of els) patches[e.id] = { x: e.x + dx, y: e.y + dy };
+      Object.assign(patches, growSections(doc.elements, sectionId, { ...box, x: box.x + dx, y: box.y + dy }, moving));
+      get().updateElements(patches);
     },
 
     duplicate(ids) {

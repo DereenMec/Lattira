@@ -1,6 +1,6 @@
 [package]
 name = "lattira"
-version = "0.4.0"
+version = "0.5.0"
 description = "栖页 · Lattira：画布式知识库与文件管理"
 edition = "2021"
 publish = false
@@ -41,6 +41,10 @@ windows = { version = "0.62", features = [
 ] }
 clipboard-win = "5"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# 链接预览：与在线更新插件用同一套 reqwest + rustls(ring)，不额外引入 TLS 实现
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+encoding_rs = "0.8"
 
 [profile.release]
 codegen-units = 1

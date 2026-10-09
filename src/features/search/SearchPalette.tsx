@@ -4,6 +4,7 @@ import { backend } from "@/services/backend";
 import { msg, useT } from "@/i18n";
 import { projectLabel, useAppStore } from "@/store/appStore";
 import type { SearchHit } from "@/types/model";
+import { Highlight } from "./Highlight";
 
 const KIND_ICON = { canvas: Shapes, text: Type, file: FileText, image: ImageIcon } as const;
 const KIND_LABEL = { canvas: msg("画布"), text: msg("文本"), file: msg("文件"), image: msg("图中文字") } as const;
@@ -13,6 +14,8 @@ export function SearchPalette() {
   const projects = useAppStore((s) => s.projects);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
+  // 当前结果对应的查询词：输入还没停下来时，高亮仍按显示中的结果来
+  const [hitsQuery, setHitsQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -31,6 +34,7 @@ export function SearchPalette() {
         .then((r) => {
           if (!alive) return;
           setHits(r);
+          setHitsQuery(q);
           setActive(0);
         })
         .catch((e) => useAppStore.getState().showToast(t("搜索失败：{error}", { error: String(e) })));
@@ -49,6 +53,8 @@ export function SearchPalette() {
       canvasId: hit.canvasId,
       focusElementId: hit.elementId ?? undefined,
       focusAssetId: hit.assetId ?? undefined,
+      // 命中画布名时不必在画布里查找
+      findQuery: hit.kind === "canvas" ? undefined : hitsQuery,
     });
   };
 
@@ -85,7 +91,9 @@ export function SearchPalette() {
                 <li key={`${h.kind}-${h.canvasId}-${h.elementId ?? h.assetId ?? i}`}>
                   <button className={i === active ? "is-active" : ""} onMouseEnter={() => setActive(i)} onClick={() => go(h)}>
                     <Icon size={15} />
-                    <span className="hit-snippet">{h.snippet}</span>
+                    <span className="hit-snippet">
+                      <Highlight text={h.snippet} query={hitsQuery} />
+                    </span>
                     <span className="hit-meta">
                       {t(KIND_LABEL[h.kind])} · {project ? projectLabel(project) : ""} / {h.canvasTitle}
                     </span>

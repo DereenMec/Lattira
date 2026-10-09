@@ -8,6 +8,7 @@ import {
   FolderInput,
   FolderOpen,
   FolderPlus,
+  Link2,
   Map as MapIcon,
   Maximize,
   Minus,
@@ -31,15 +32,20 @@ import {
 } from "react";
 import {
   boundsOf,
+  center,
   contains,
   fitRect,
+  growSections,
   intersects,
   normalizeRect,
   screenToWorld,
+  sectionAt,
+  withContents,
   zoomAt,
   type Point,
   type Rect,
 } from "@/lib/geometry";
+import { SNAP_PX, snapMove, snapResize, snapTargets, type Guide, type SnapTargets } from "@/lib/snap";
 import { openContextMenu } from "@/features/menu/ContextMenu";
 import { elementMenu } from "@/features/menu/menus";
 import { t, useT } from "@/i18n";
@@ -51,15 +57,37 @@ import { EdgeLayer } from "./EdgeLayer";
 import { ElementView, type ElementHandlers } from "./ElementView";
 import { copySelection, pasteIntoCanvas } from "./clipboard";
 import { FindBar, findMatches } from "./FindBar";
+import { importedMessage, pathsKey, runImport } from "./importing";
+import { openLink, promptLink } from "./links";
 import { Minimap } from "./Minimap";
 import { assetsInTree, elementsForAssets, elementsForTree, newFolder, newTextCard } from "./placement";
 
 type Gesture =
   | { kind: "pan"; start: Point; vp: Viewport }
-  | { kind: "drag"; start: Point; origins: Map<ID, Point>; moved: boolean }
+  /** box：被拖动元素的整体外框（拖动前），吸附按它计算 */
+  | {
+      kind: "drag";
+      start: Point;
+      origins: Map<ID, Point>;
+      box: Rect;
+      moved: boolean;
+      targets?: SnapTargets;
+      /** 松手后要放进的文件夹，及拖动后的外框 */
+      drop?: { sectionId: ID; box: Rect };
+    }
   | { kind: "marquee"; start: Point; base: ID[] }
-  | { kind: "resize"; id: ID; start: Point; width: number; height: number; ratio?: number }
+  | { kind: "resize"; id: ID; start: Point; rect: Rect; ratio?: number; targets: SnapTargets }
   | { kind: "connect"; fromId: ID };
+
+const NO_GUIDES: Guide[] = [];
+
+/** 方向键微调：每次 1 像素，按住 Shift 10 像素 */
+const NUDGE: Record<string, [number, number]> = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+};
 
 /** 缩放低于此值时卡片只画轮廓和首行文字 */
 const LOD_ZOOM = 0.4;
@@ -112,9 +140,11 @@ interface Props {
   focusElementId?: ID;
   /** 搜索命中文件或图片时，定位到引用它的卡片 */
   focusAssetId?: ID;
+  /** 从全局搜索跳过来时，打开画布内查找并填入这个词，命中的文字都高亮 */
+  findQuery?: string;
 }
 
-export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
+export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }: Props) {
   useT();
   const doc = useCanvasStore((s) => s.doc);
   const selectedIds = useCanvasStore((s) => s.selectedIds);
@@ -133,12 +163,18 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [marquee, setMarquee] = useState<Rect | null>(null);
   const [pendingEdge, setPendingEdge] = useState<{ fromId: ID; to: Point } | null>(null);
+  const [guides, setGuides] = useState<Guide[]>(NO_GUIDES);
+  const [dropSectionId, setDropSectionId] = useState<ID | null>(null);
+  // 按住方向键连续微调时合并成一步撤销，松开方向键时结束
+  const nudging = useRef(false);
   const [panning, setPanning] = useState(false);
   const [highlightId, setHighlightId] = useState<ID | null>(null);
   const [dropActive, setDropActive] = useState(false);
   // nav 每次跳转加一：即使跳到同一个结果也会重新定位
   const [find, setFind] = useState({ open: false, query: "", index: 0, nav: 0 });
   const highlightTimer = useRef<number | undefined>(undefined);
+  // 从全局搜索跳过来的那张卡片：查找结果出来后，把查找栏的序号对到它
+  const pendingFindFocus = useRef<ID | null>(null);
 
   const loaded = doc?.canvasId === canvasId;
 
@@ -193,9 +229,14 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     canvas().setViewport(fitRect(el, size.w, size.h, 160, 1));
     canvas().select([el.id]);
     setHighlightId(el.id);
+    if (findQuery?.trim()) {
+      // nav 不变：不再跳到第一处命中，停在搜索结果对应的卡片上；序号等结果算出来后再对齐
+      setFind((f) => ({ ...f, open: true, query: findQuery.trim(), index: 0 }));
+      pendingFindFocus.current = el.id;
+    }
     const timer = window.setTimeout(() => setHighlightId(null), 1600);
     return () => window.clearTimeout(timer);
-  }, [loaded, focusElementId, focusAssetId, size.w, size.h]);
+  }, [loaded, focusElementId, focusAssetId, findQuery, size.w, size.h]);
 
   // ---- 坐标换算 ----
   const toLocal = useCallback((e: { clientX: number; clientY: number }): Point => {
@@ -214,11 +255,26 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     return inside ? toWorld(p) : viewCenterWorld();
   }, [toWorld, viewCenterWorld]);
 
+  /** 吸附目标：视口里除 exclude 以外的元素 */
+  const snapTargetsExcept = useCallback(
+    (exclude: Set<ID>) => {
+      const view = viewRect(canvas().viewport, size.w, size.h);
+      return snapTargets((canvas().doc?.elements ?? []).filter((el) => !exclude.has(el.id) && intersects(view, el)));
+    },
+    [size],
+  );
+
+  const endNudge = useCallback(() => {
+    if (!nudging.current) return;
+    nudging.current = false;
+    canvas().endGesture();
+  }, []);
+
   // ---- 导入文件 ----
-  const placeAssets = useCallback(async (load: () => Promise<Asset[]>, at: Point) => {
+  const placeAssets = useCallback(async (load: (task: string) => Promise<Asset[]>, at: Point) => {
     try {
-      const imported = await load();
-      if (imported.length === 0) return;
+      const imported = await runImport(load, { done: (a) => importedMessage(a.length) });
+      if (!imported?.length) return;
       app().addAssets(imported);
       canvas().addElements(elementsForAssets(imported, at));
     } catch (e) {
@@ -229,7 +285,11 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
   /** 按路径导入文件和文件夹：文件夹变成分组框，里面的文件按网格排好 */
   const placeTree = useCallback(async (paths: string[], at: Point) => {
     try {
-      const nodes = await backend.importTree(paths);
+      const nodes = await runImport((task) => backend.importTree(paths, task), {
+        key: pathsKey(paths),
+        done: (n) => importedMessage(assetsInTree(n).length),
+      });
+      if (!nodes) return;
       const assets = assetsInTree(nodes);
       if (assets.length === 0 && nodes.length === 0) return;
       app().addAssets(assets);
@@ -259,7 +319,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       input.multiple = true;
       input.onchange = () => {
         const files = Array.from(input.files ?? []);
-        if (files.length) void placeAssets(() => backend.importBlobs(files), at);
+        if (files.length) void placeAssets((task) => backend.importBlobs(files, task), at);
       };
       input.click();
     }
@@ -344,6 +404,25 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
       const s = canvas();
+      const nudge = NUDGE[e.key];
+      if (nudge && !mod && !e.altKey) {
+        if (s.selectedIds.length === 0) return;
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        if (!nudging.current) {
+          s.beginGesture();
+          nudging.current = true;
+        }
+        const moving = withContents(s.doc!.elements, s.selectedIds);
+        const patches: Record<ID, Point> = {};
+        for (const el of s.doc!.elements) {
+          if (moving.has(el.id)) patches[el.id] = { x: el.x + nudge[0] * step, y: el.y + nudge[1] * step };
+        }
+        s.updateDuringGesture(patches);
+        return;
+      }
+      // 微调中按了别的键（如 Ctrl+Z）：先把微调记入历史
+      endNudge();
       if (e.code === "Space") {
         e.preventDefault();
         spaceHeld.current = true;
@@ -383,6 +462,9 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         } else if (el?.type === "section") {
           e.preventDefault();
           s.setEditing(el.id);
+        } else if (el?.type === "link") {
+          e.preventDefault();
+          void openLink(el.url);
         }
       } else if (mod && key === "c" && s.selectedIds.length > 0) {
         // 页面里有选中的文字（如检查器中的识别结果）时，保留浏览器的复制文字
@@ -399,6 +481,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.code === "Space") spaceHeld.current = false;
+      if (NUDGE[e.key]) endNudge();
     };
     const onPaste = (e: ClipboardEvent) => {
       if (app().searchOpen || isTyping(e.target) || !canvas().doc) return;
@@ -413,12 +496,16 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("paste", onPaste);
+    // 按住方向键时切走窗口，收不到 keyup
+    window.addEventListener("blur", endNudge);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("paste", onPaste);
+      window.removeEventListener("blur", endNudge);
+      endNudge();
     };
-  }, [fitAll, zoomBy, viewCenterWorld, pasteAnchor]);
+  }, [fitAll, zoomBy, viewCenterWorld, pasteAnchor, endNudge]);
 
   // ---- 指针手势 ----
   const capture = (e: ReactPointerEvent) => {
@@ -431,6 +518,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
 
   const onBackgroundPointerDown = (e: ReactPointerEvent) => {
     if (!canvas().doc) return;
+    endNudge();
     if (e.button === 1 || (e.button === 0 && spaceHeld.current)) {
       e.preventDefault();
       gesture.current = { kind: "pan", start: toLocal(e), vp: canvas().viewport };
@@ -450,6 +538,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     onPointerDown(e, id) {
       if (e.button !== 0 || spaceHeld.current) return; // 交给背景处理平移
       e.stopPropagation();
+      endNudge();
       const s = canvas();
       if (!s.doc || s.editingId === id) return;
       if (e.shiftKey) {
@@ -462,22 +551,21 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         ids = [id];
       }
       // 拖动分组框时，带上框内的元素
-      const moving = new Set(ids);
-      for (const sec of s.doc.elements) {
-        if (sec.type !== "section" || !moving.has(sec.id)) continue;
-        for (const other of s.doc.elements) if (other.id !== sec.id && contains(sec, other)) moving.add(other.id);
-      }
+      const moving = withContents(s.doc.elements, ids);
       const origins = new Map<ID, Point>();
-      for (const el of s.doc.elements) if (moving.has(el.id)) origins.set(el.id, { x: el.x, y: el.y });
+      const movingEls = s.doc.elements.filter((el) => moving.has(el.id));
+      for (const el of movingEls) origins.set(el.id, { x: el.x, y: el.y });
       // 真正拖动后才捕获指针：过早捕获会让双击事件落到画布背景上
-      gesture.current = { kind: "drag", start: toWorld(e), origins, moved: false };
+      gesture.current = { kind: "drag", start: toWorld(e), origins, box: boundsOf(movingEls)!, moved: false };
     },
     onResizeStart(e, id) {
       e.stopPropagation();
+      endNudge();
       const el = canvas().doc?.elements.find((x) => x.id === id);
       if (!el) return;
       const ratio = el.type === "image" ? el.height / el.width : undefined;
-      gesture.current = { kind: "resize", id, start: toWorld(e), width: el.width, height: el.height, ratio };
+      const rect = { x: el.x, y: el.y, width: el.width, height: el.height };
+      gesture.current = { kind: "resize", id, start: toWorld(e), rect, ratio, targets: snapTargetsExcept(new Set([id])) };
       canvas().beginGesture();
       capture(e);
     },
@@ -492,6 +580,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       if (!el) return;
       if (el.type === "text") canvas().openEditor(id);
       else if (el.type === "section") canvas().setEditing(id);
+      else if (el.type === "link") void openLink(el.url);
       else {
         const asset = app().assets.get(el.assetId);
         if (!asset) app().showToast(t("找不到这个文件"));
@@ -550,12 +639,31 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         if (!g.moved) {
           if (Math.hypot(dx, dy) * s.viewport.zoom < 3) return;
           g.moved = true;
+          g.targets = snapTargetsExcept(new Set(g.origins.keys()));
           s.beginGesture();
           capture(e);
         }
+        // 按住 Alt 时不吸附
+        let sx = 0;
+        let sy = 0;
+        if (g.targets && !e.altKey) {
+          const snap = snapMove({ ...g.box, x: g.box.x + dx, y: g.box.y + dy }, g.targets, SNAP_PX / s.viewport.zoom);
+          sx = snap.dx;
+          sy = snap.dy;
+          setGuides(snap.guides.length ? snap.guides : NO_GUIDES);
+        } else {
+          setGuides(NO_GUIDES);
+        }
         const patches: Record<ID, Point> = {};
-        for (const [id, o] of g.origins) patches[id] = { x: o.x + dx, y: o.y + dy };
+        for (const [id, o] of g.origins) patches[id] = { x: o.x + dx + sx, y: o.y + dy + sy };
         s.updateDuringGesture(patches);
+        // 中心落进了别的文件夹，或者会超出所在的文件夹：高亮它，松手时放进去并按需扩大
+        const box = { ...g.box, x: g.box.x + dx + sx, y: g.box.y + dy + sy };
+        const moving = new Set(g.origins.keys());
+        const section = e.altKey ? undefined : sectionAt(s.doc.elements, center(box), moving);
+        const into = section && (!contains(section, g.box) || !contains(section, box)) ? section : undefined;
+        g.drop = into ? { sectionId: into.id, box } : undefined;
+        setDropSectionId(into?.id ?? null);
         break;
       }
       case "marquee": {
@@ -569,8 +677,15 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
       }
       case "resize": {
         const w = toWorld(e);
-        const width = Math.max(80, g.width + w.x - g.start.x);
-        const height = g.ratio ? width * g.ratio : Math.max(48, g.height + w.y - g.start.y);
+        let width = Math.max(80, g.rect.width + w.x - g.start.x);
+        let height = g.ratio ? width * g.ratio : Math.max(48, g.rect.height + w.y - g.start.y);
+        if (!e.altKey) {
+          const snap = snapResize({ ...g.rect, width, height }, g.targets, SNAP_PX / s.viewport.zoom, !!g.ratio);
+          if (snap.width >= 80 && snap.height >= 48) ({ width, height } = snap);
+          setGuides(snap.guides.length ? snap.guides : NO_GUIDES);
+        } else {
+          setGuides(NO_GUIDES);
+        }
         s.updateDuringGesture({ [g.id]: { width, height } });
         break;
       }
@@ -585,7 +700,15 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
     gesture.current = null;
     const s = canvas();
     if (!g || !s.doc) return;
-    if (g.kind === "drag" && g.moved) s.endGesture();
+    setGuides(NO_GUIDES);
+    setDropSectionId(null);
+    if (g.kind === "drag" && g.moved) {
+      if (g.drop) {
+        const grow = growSections(s.doc.elements, g.drop.sectionId, g.drop.box, new Set(g.origins.keys()));
+        if (Object.keys(grow).length) s.updateDuringGesture(grow);
+      }
+      s.endGesture();
+    }
     else if (g.kind === "resize") s.endGesture();
     else if (g.kind === "marquee") setMarquee(null);
     else if (g.kind === "pan") setPanning(false);
@@ -614,6 +737,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         onSelect: () => canvas().addElements([newTextCard(at)], { edit: true }),
       },
       { label: t("在此新建空文件夹"), icon: <FolderPlus size={15} />, onSelect: () => canvas().addElements([newFolder(at)], { edit: true }) },
+      { label: t("在此添加链接…"), icon: <Link2 size={15} />, onSelect: () => void promptLink(at) },
       "separator",
       { label: t("在此插入文件…"), icon: <Paperclip size={15} />, onSelect: () => void pickFiles(at) },
       { label: t("从电脑导入文件夹…"), icon: <FolderOpen size={15} />, onSelect: () => void pickFiles(at, true) },
@@ -677,7 +801,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
             e.preventDefault();
             setDropActive(false);
             const files = Array.from(e.dataTransfer.files);
-            if (files.length) void placeAssets(() => backend.importBlobs(files), toWorld(e));
+            if (files.length) void placeAssets((task) => backend.importBlobs(files, task), toWorld(e));
           },
         }
       : {};
@@ -711,6 +835,14 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
   );
 
   // 输入查询或按上一个 / 下一个时定位；编辑画布导致结果变化时不跳，以免打断用户
+  useEffect(() => {
+    const id = pendingFindFocus.current;
+    if (!id || !find.open) return;
+    pendingFindFocus.current = null;
+    const i = matches.indexOf(id);
+    if (i > 0) setFind((f) => ({ ...f, index: i }));
+  }, [matches, find.open]);
+
   const currentMatch = matches.length ? matches[Math.min(find.index, matches.length - 1)] : undefined;
   useEffect(() => {
     if (find.open && currentMatch) revealElement(currentMatch);
@@ -738,6 +870,9 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         editing={editingId === el.id}
         highlighted={highlightId === el.id}
         matched={matchSet.has(el.id)}
+        findQuery={matchSet.has(el.id) ? find.query : undefined}
+        currentMatch={find.open && el.id === currentMatch}
+        dropTarget={dropSectionId === el.id}
         lod={lod}
         asset={asset}
         assetUrl={asset && el.type === "image" ? backend.assetUrl(asset) : undefined}
@@ -770,6 +905,22 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
           onContextMenu={onEdgeMenu}
         />
         {visible.filter((e) => e.type !== "section").map(renderEl)}
+        {guides.map((g, i) => {
+          // 参考线始终 1 个屏幕像素粗
+          const px = 1 / canvas().viewport.zoom;
+          const vertical = g.axis === "x";
+          return (
+            <div
+              key={i}
+              className="snap-guide"
+              style={{
+                transform: vertical ? `translate(${g.at - px / 2}px, ${g.from}px)` : `translate(${g.from}px, ${g.at - px / 2}px)`,
+                width: vertical ? px : g.to - g.from,
+                height: vertical ? g.to - g.from : px,
+              }}
+            />
+          );
+        })}
         {marquee && (
           <div
             className="marquee"
@@ -806,6 +957,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId }: Props) {
         minimapOpen={minimapOpen}
         onAddText={() => canvas().addElements([newTextCard(viewCenterWorld())], { edit: true })}
         onAddFiles={() => void pickFiles()}
+        onAddLink={() => void promptLink(viewCenterWorld())}
         onAddFolder={() => void pickFiles(undefined, true)}
         onNewFolder={() => canvas().addElements([newFolder(viewCenterWorld())], { edit: true })}
         onGroup={() => canvas().groupSelection()}
@@ -820,6 +972,7 @@ function Toolbar(props: {
   minimapOpen: boolean;
   onAddText(): void;
   onAddFiles(): void;
+  onAddLink(): void;
   onAddFolder(): void;
   onNewFolder(): void;
   onGroup(): void;
@@ -842,6 +995,10 @@ function Toolbar(props: {
       <button className="tb-btn" onClick={props.onAddFiles} title={t("插入文件或图片")}>
         <Paperclip size={16} />
         <span>{t("文件")}</span>
+      </button>
+      <button className="tb-btn" onClick={props.onAddLink} title={t("添加网页链接（也可以直接粘贴网址）")}>
+        <Link2 size={16} />
+        <span>{t("链接")}</span>
       </button>
       <button
         className="tb-btn"

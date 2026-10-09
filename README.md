@@ -30,20 +30,22 @@
 
 - 无限画布：平移、缩放、框选、多选拖动、小地图，上千张卡片依然流畅
 - 文本卡片、文件卡片、图片卡片，卡片之间可以连线，可以着色
-- **文件夹**：画布上带标题的框，拖动时带着里面的卡片一起走；从电脑导入整个文件夹时，子文件夹会变成嵌套的框
+- **链接卡片**：粘贴网址即可，自动显示网页标题、简介、预览图和网站图标，双击在浏览器中打开
+- 拖动和调整大小时**自动吸附对齐**其他卡片并显示参考线（按住 Alt 暂时关闭），方向键微调位置
+- **文件夹**：画布上带标题的框，拖动时带着里面的卡片一起走；把卡片拖进框里（或右键「移到文件夹」）即可放进去，框不够大时自动变大；从电脑导入整个文件夹时，子文件夹会变成嵌套的框
 - 撤销 / 重做、复制粘贴（文件可以直接粘贴到微信、资源管理器）、对齐与等距分布
 - **多标签页**：同时打开多个画布，切换时各自的撤销历史都在
 
 ### 文件
 
-- 把文件或图片拖进窗口即可导入，会复制一份进工作区；**内容相同的文件只存一份**
+- 把文件或图片拖进窗口即可导入，会复制一份进工作区；**内容相同的文件只存一份**；导入大文件或大文件夹时右下角显示进度
 - 双击用默认程序打开，右键可以在资源管理器中显示、另存为、重命名
 - **资源库**：所有导入过的文件一览，看得到被哪些画布引用、哪些已经没人用，可以多选清理
 
 ### 找回
 
 - **全局搜索**（Ctrl+E）：画布名、卡片文字、文件名，以及**图片中的文字**（用 Windows 自带的 OCR 识别），点结果直接跳到那张卡片
-- **画布内查找**（Ctrl+F）
+- **画布内查找**（Ctrl+F）；搜索结果和卡片上命中的文字都会高亮，从全局搜索跳到画布时自动带上搜索词
 - **日历**：每个画布出现在它被编辑过的每一天，回看某天做了什么
 - **最近**：所有画布按最后编辑时间排列，带缩略图
 
@@ -86,6 +88,8 @@
 | 最近 / 未分类 / 日历 / 资源库 | Ctrl+1 / 2 / 3 / 4 |
 | 关闭标签页 / 切换标签页 | Ctrl+W / Ctrl+Tab |
 | 新建文本卡片 | T |
+| 微调选中的卡片 1 / 10 像素 | 方向键 / Shift+方向键 |
+| 拖动时暂时不吸附 | 按住 Alt |
 | 放进文件夹 | Ctrl+G |
 | 显示全部内容 | Shift+1 |
 | 设置 | Ctrl+, |
@@ -101,7 +105,7 @@
 画布文件兼容 [JSON Canvas](https://jsoncanvas.org) 格式，Obsidian 能直接打开；Obsidian 的画布也可以导入栖页，引用的文件会一起复制进来。
 
 **需要联网吗？**
-不需要。只有检查更新时会访问 GitHub，可以在「设置 → 关于」里关掉自动检查。
+不需要。栖页只在两种情况下联网：检查更新时访问 GitHub（可以在「设置 → 关于」里关掉自动检查）；把网址放到画布上时访问该网页获取标题和预览图（可以在「设置 → 通用 → 链接预览」里关掉）。
 
 **删错了怎么办？**
 删除的画布和文件会先进回收站，在侧栏底部的「回收站」里恢复。
@@ -139,6 +143,8 @@ npm run tauri dev
 - Drag files in — they're copied into your workspace and de-duplicated by content
 - Search canvas titles, card text, file names and **text inside images** (Windows OCR)
 - Folders on the canvas, links between cards, multiple canvases in tabs
+- Paste a URL to get a link card with the page's title, description and preview image
+- Cards snap to each other with alignment guides while dragging; arrow keys nudge the selection
 - Trash with restore, export / import (compatible with Obsidian's JSON Canvas)
 - Light / dark themes, tray icon with a global shortcut (Ctrl+Shift+L), customizable shortcuts, in-app updates
 - Everything lives in a plain folder on your computer — no account, no cloud

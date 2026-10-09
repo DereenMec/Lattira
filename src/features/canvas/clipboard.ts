@@ -4,13 +4,15 @@
  * 复制时系统剪贴板里同时放：文件（文件 / 图片卡片的原文件）、纯文本（文本卡片的内容）、
  * 栖页卡片数据。粘贴到微信、资源管理器等应用时用前两种；粘贴回画布时用卡片数据，保留布局、颜色和连线。
  */
-import { boundsOf, contains, type Point } from "@/lib/geometry";
+import { boundsOf, withContents, type Point } from "@/lib/geometry";
 import { uuidv7 } from "@/lib/id";
 import { t } from "@/i18n";
 import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasElement, Edge, ID } from "@/types/model";
+import { importedMessage, pathsKey, runImport } from "./importing";
+import { hostOf, placeLinks, urlsInText } from "./links";
 import { assetsInTree, elementsForAssets, elementsForTree, newTextCard } from "./placement";
 
 const app = () => useAppStore.getState();
@@ -31,11 +33,7 @@ const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.trim() ?? 
 export async function copySelection(): Promise<void> {
   const { doc, selectedIds } = canvas();
   if (!doc || selectedIds.length === 0) return;
-  const ids = new Set(selectedIds);
-  for (const sec of doc.elements) {
-    if (sec.type !== "section" || !ids.has(sec.id)) continue;
-    for (const el of doc.elements) if (el.id !== sec.id && contains(sec, el)) ids.add(el.id);
-  }
+  const ids = withContents(doc.elements, selectedIds);
   const elements = doc.elements.filter((e) => ids.has(e.id));
   const edges = doc.edges.filter((e) => ids.has(e.fromId) && ids.has(e.toId));
   const { assets } = app();
@@ -46,7 +44,11 @@ export async function copySelection(): Promise<void> {
     if (a) used.set(a.id, a);
   }
   const texts = elements.flatMap((el) =>
-    el.type === "text" && el.text.trim() ? [{ name: firstLine(el.text).slice(0, 40) || t("文本"), text: el.text }] : [],
+    el.type === "text" && el.text.trim()
+      ? [{ name: firstLine(el.text).slice(0, 40) || t("文本"), text: el.text }]
+      : el.type === "link"
+        ? [{ name: (el.title || hostOf(el.url)).slice(0, 40), text: el.url }]
+        : [],
   );
   const cards: CopiedCards = {
     app: "lattira",
@@ -84,7 +86,9 @@ async function pasteCards(data: CopiedCards, at: Point) {
   const remap = new Map<ID, ID>();
   const missing = data.assets.filter((a) => !assets.has(a.id) && a.absPath);
   if (missing.length > 0 && backend.kind === "tauri") {
-    const imported = await backend.importPaths(missing.map((a) => a.absPath));
+    const paths = missing.map((a) => a.absPath);
+    const imported = await runImport((task) => backend.importPaths(paths, task), { key: pathsKey(paths) });
+    if (!imported) return;
     app().addAssets(imported);
     missing.forEach((a, i) => remap.set(a.id, imported[i].id));
   }
@@ -112,7 +116,7 @@ async function pasteCards(data: CopiedCards, at: Point) {
 
 /**
  * 粘贴到画布：依次尝试栖页卡片 → 剪贴板中的文件（如资源管理器里复制的）→
- * 浏览器给出的文件（如截图）→ 纯文本。fallback 需在 paste 事件中同步读取。
+ * 浏览器给出的文件（如截图）→ 纯文本（只有网址时变成链接卡片）。fallback 需在 paste 事件中同步读取。
  */
 export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text: string }): Promise<void> {
   try {
@@ -122,13 +126,20 @@ export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text
 
     // 资源管理器中复制的文件和文件夹：文件夹变成分组框
     if (clip?.files.length) {
-      const nodes = await backend.importTree(clip.files);
+      const files = clip.files;
+      const nodes = await runImport((task) => backend.importTree(files, task), {
+        key: pathsKey(files),
+        done: (n) => importedMessage(assetsInTree(n).length),
+      });
+      if (!nodes) return;
       app().addAssets(assetsInTree(nodes));
       canvas().addElements(elementsForTree(nodes, at));
       return;
     }
     let imported: Asset[] = [];
-    if (fallback.files.length) imported = await backend.importBlobs(fallback.files);
+    if (fallback.files.length) {
+      imported = (await runImport((task) => backend.importBlobs(fallback.files, task), { done: (a) => importedMessage(a.length) })) ?? [];
+    }
     if (imported.length) {
       app().addAssets(imported);
       canvas().addElements(elementsForAssets(imported, at));
@@ -136,7 +147,9 @@ export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text
     }
 
     const text = fallback.text || clip?.text || "";
-    if (text.trim()) canvas().addElements([newTextCard(at, text)]);
+    const urls = urlsInText(text);
+    if (urls.length) placeLinks(urls, at);
+    else if (text.trim()) canvas().addElements([newTextCard(at, text)]);
   } catch (e) {
     app().showToast(t("粘贴失败：{error}", { error: String(e) }));
   }

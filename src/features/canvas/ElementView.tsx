@@ -1,9 +1,12 @@
-import { ImageOff } from "lucide-react";
+import { Globe, ImageOff } from "lucide-react";
 import { memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useT } from "@/i18n";
 import { fileIconUrl } from "@/lib/fileIcons";
 import { fileExtension, formatBytes } from "@/lib/format";
-import type { Asset, CanvasElement, ID } from "@/types/model";
+import { backend } from "@/services/backend";
+import type { Asset, CanvasElement, ID, LinkElement } from "@/types/model";
+import { Highlight } from "@/features/search/Highlight";
+import { hostOf, useLinkFetching } from "./links";
 
 export interface ElementHandlers {
   onPointerDown(e: ReactPointerEvent, id: ID): void;
@@ -23,6 +26,12 @@ interface Props {
   highlighted: boolean;
   /** 命中画布内查找 */
   matched: boolean;
+  /** 文件夹：拖动的卡片松手后会放进它 */
+  dropTarget?: boolean;
+  /** 命中画布内查找时的查询词，用来高亮卡片上的文字；没命中时为空，查询变化不会让其他卡片重新渲染 */
+  findQuery?: string;
+  /** 查找中当前跳到的那一个 */
+  currentMatch?: boolean;
   /** 缩得很小时只画首行文字，减少排版开销 */
   lod: boolean;
   asset?: Asset;
@@ -30,7 +39,21 @@ interface Props {
   handlers: ElementHandlers;
 }
 
-function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matched, lod, asset, assetUrl, handlers }: Props) {
+function ElementViewImpl({
+  el,
+  selected,
+  showHandles,
+  editing,
+  highlighted,
+  matched,
+  dropTarget,
+  findQuery,
+  currentMatch,
+  lod,
+  asset,
+  assetUrl,
+  handlers,
+}: Props) {
   const t = useT();
   const isSection = el.type === "section";
   const className = [
@@ -41,6 +64,8 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matc
     editing ? "is-editing" : "",
     highlighted ? "is-highlighted" : "",
     matched ? "is-match" : "",
+    currentMatch ? "is-current-match" : "",
+    dropTarget ? "is-drop-target" : "",
     lod ? "is-lod" : "",
   ]
     .filter(Boolean)
@@ -59,9 +84,13 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matc
         (editing ? (
           <TextEditor initial={el.text} multiline onDone={(v) => handlers.onFinishEdit(el.id, v)} />
         ) : lod ? (
-          <div className="el-text-lod">{firstLine(el.text)}</div>
+          <div className="el-text-lod">
+            <Highlight text={firstLine(el.text)} query={findQuery} />
+          </div>
         ) : (
-          <div className="el-text-body">{el.text || <span className="placeholder">{t("空白卡片")}</span>}</div>
+          <div className="el-text-body">
+            {el.text ? <Highlight text={el.text} query={findQuery} /> : <span className="placeholder">{t("空白卡片")}</span>}
+          </div>
         ))}
 
       {el.type === "image" &&
@@ -79,7 +108,7 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matc
           <img className="file-icon" src={fileIconUrl(asset?.name ?? "")} alt="" draggable={false} />
           <div className="file-meta">
             <div className="file-name" title={asset?.name}>
-              {asset?.name ?? t("文件不可用")}
+              {asset ? <Highlight text={asset.name} query={findQuery} /> : t("文件不可用")}
             </div>
             <div className="file-sub">
               {asset ? `${fileExtension(asset.name).toUpperCase() || t("文件")} · ${formatBytes(asset.size)}` : ""}
@@ -87,6 +116,8 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matc
           </div>
         </div>
       )}
+
+      {el.type === "link" && <LinkBody el={el} lod={lod} query={findQuery} />}
 
       {el.type === "section" && (
         <div
@@ -97,8 +128,10 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matc
         >
           {editing ? (
             <TextEditor initial={el.label} onDone={(v) => handlers.onFinishEdit(el.id, v)} />
+          ) : el.label ? (
+            <Highlight text={el.label} query={findQuery} />
           ) : (
-            el.label || t("未命名文件夹")
+            t("未命名文件夹")
           )}
         </div>
       )}
@@ -116,6 +149,58 @@ function ElementViewImpl({ el, selected, showHandles, editing, highlighted, matc
 }
 
 export const ElementView = memo(ElementViewImpl);
+
+function LinkBody({ el, lod, query }: { el: LinkElement; lod: boolean; query?: string }) {
+  const t = useT();
+  const fetching = useLinkFetching((s) => s.ids.has(el.id));
+  // 缓存的图片被删掉（例如导入的画布没有带上预览图）时不显示破图
+  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
+  const fail = (src: string) => setFailed((f) => new Set(f).add(src));
+  const host = hostOf(el.url);
+  const title = el.title || host;
+  if (lod)
+    return (
+      <div className="el-text-lod">
+        <Highlight text={title} query={query} />
+      </div>
+    );
+  const image = el.image ? backend.workspaceFileUrl(el.image) : "";
+  const icon = el.icon ? backend.workspaceFileUrl(el.icon) : "";
+  return (
+    <div className="el-link-body" title={el.url}>
+      {image && !failed.has(image) && (
+        <img className="link-image" src={image} alt="" draggable={false} decoding="async" onError={() => fail(image)} />
+      )}
+      <div className="link-meta">
+        <div className="link-title">
+          <Highlight text={title} query={query} />
+        </div>
+        {el.description ? (
+          <div className="link-desc">
+            <Highlight text={el.description} query={query} />
+          </div>
+        ) : (
+          !el.title && (
+            <div className="link-desc link-url">
+              <Highlight text={el.url} query={query} />
+            </div>
+          )
+        )}
+        {/* 没有获取到网页信息时标题已经是域名，不再重复 */}
+        {(fetching || el.title) && (
+          <div className="link-site">
+            {icon && !failed.has(icon) ? (
+              <img className="link-icon" src={icon} alt="" draggable={false} onError={() => fail(icon)} />
+            ) : (
+              <Globe size={13} className="link-icon" />
+            )}
+            <span>{fetching ? t("正在获取网页信息…") : el.siteName && el.siteName !== host ? `${el.siteName} · ${host}` : host}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 const firstLine = (s: string) => s.split("\n").find((l) => l.trim()) ?? "";
 

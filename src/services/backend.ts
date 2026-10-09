@@ -6,6 +6,7 @@ import type {
   ChangeSummary,
   ID,
   ImportNode,
+  LinkPreview,
   LocalDate,
   Project,
   SearchHit,
@@ -60,12 +61,15 @@ export interface Backend {
   loadCanvas(id: ID): Promise<string>;
   saveCanvas(id: ID, content: string, index: CanvasIndex, changes: ChangeSummary): Promise<CanvasMeta>;
 
-  /** 按绝对路径导入文件（桌面端拖放），文件会被复制进工作区 */
-  importPaths(paths: string[]): Promise<Asset[]>;
+  /**
+   * 导入文件。task 为 importProgress 里的任务 id，给出时上报进度。
+   * 按绝对路径导入文件（桌面端拖放），文件会被复制进工作区
+   */
+  importPaths(paths: string[], task?: string): Promise<Asset[]>;
   /** 按绝对路径导入文件和文件夹，保留文件夹结构（文件夹会在画布上变成分组框） */
-  importTree(paths: string[]): Promise<ImportNode[]>;
+  importTree(paths: string[], task?: string): Promise<ImportNode[]>;
   /** 导入浏览器 File 对象（粘贴、浏览器拖放） */
-  importBlobs(files: File[]): Promise<Asset[]>;
+  importBlobs(files: File[], task?: string): Promise<Asset[]>;
   listAssets(): Promise<Asset[]>;
   assetUrl(asset: Asset): string;
   /** 用系统默认程序打开文件 */
@@ -90,6 +94,13 @@ export interface Backend {
   readClipboard(): Promise<ClipboardContent>;
   /** 后台 OCR 等更新了某个资源时回调；返回取消订阅函数 */
   subscribeAssetUpdates(onUpdate: (assetId: ID) => void): () => void;
+
+  /** 访问网页，获取链接卡片的标题、简介、预览图和图标（图片保存在工作区） */
+  fetchLinkPreview(url: string): Promise<LinkPreview>;
+  /** 用默认浏览器打开链接 */
+  openUrl(url: string): Promise<void>;
+  /** 工作区内文件（如链接预览图）的显示地址；path 相对工作区根目录 */
+  workspaceFileUrl(path: string): string;
 
   /** 让用户选位置，把画布连同引用的文件导出为画布包（.zip）；取消时返回 false */
   exportCanvas(canvas: CanvasMeta): Promise<boolean>;

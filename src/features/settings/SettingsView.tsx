@@ -47,6 +47,7 @@ function GeneralSection() {
   const locale = useLocale((s) => s.locale);
   const theme = useSettings((s) => s.theme);
   const closeToTray = useSettings((s) => s.closeToTray);
+  const linkPreviews = useSettings((s) => s.linkPreviews);
   const setClose = (enabled: boolean) =>
     void useSettings
       .getState()
@@ -88,6 +89,19 @@ function GeneralSection() {
             { value: "quit", label: t("退出栖页") },
           ]}
           onChange={(v) => setClose(v === "tray")}
+        />
+      </Row>
+      <Row
+        title={t("链接预览")}
+        desc={t("把网址放到画布上时，访问该网页获取标题、简介和预览图，图片保存在工作区里。关闭后链接卡片只显示网址，栖页不会访问这些网页。")}
+      >
+        <Segmented
+          value={linkPreviews ? "on" : "off"}
+          options={[
+            { value: "on", label: t("获取") },
+            { value: "off", label: t("不获取") },
+          ]}
+          onChange={(v) => useSettings.getState().setLinkPreviews(v === "on")}
         />
       </Row>
     </>

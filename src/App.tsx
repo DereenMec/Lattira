@@ -4,6 +4,7 @@ import { CalendarView } from "@/features/calendar/CalendarView";
 import { CanvasPage } from "@/features/canvas/CanvasPage";
 import { CanvasDragGhost } from "@/features/layout/canvasDrag";
 import { ErrorBoundary } from "@/features/layout/ErrorBoundary";
+import { ImportProgressHost } from "@/features/layout/ImportProgress";
 import { ContextMenuHost, useSuppressNativeMenu } from "@/features/menu/ContextMenu";
 import { PromptHost } from "@/features/menu/PromptDialog";
 import { ProjectStyleDialog } from "@/features/project/ProjectStyleDialog";
@@ -164,6 +165,7 @@ export function App() {
                   canvasId={view.canvasId}
                   focusElementId={view.focusElementId}
                   focusAssetId={view.focusAssetId}
+                  findQuery={view.findQuery}
                 />
               )}
               {view.kind === "recent" && <RecentView />}
@@ -181,6 +183,7 @@ export function App() {
       <CanvasDragGhost />
       <ContextMenuHost />
       <PromptHost />
+      <ImportProgressHost />
       <ProjectStyleDialog />
     </>
   );

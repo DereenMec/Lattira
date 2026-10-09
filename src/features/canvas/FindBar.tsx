@@ -1,15 +1,18 @@
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useT } from "@/i18n";
+import { linkText } from "@/store/canvasStore";
 import type { Asset, CanvasElement, ID } from "@/types/model";
 
-/** 元素中可被查找的文字：卡片正文、分组标题、文件名、图片名与图中文字 */
+/** 元素中可被查找的文字：卡片正文、分组标题、链接标题与网址、文件名、图片名与图中文字 */
 function searchableText(el: CanvasElement, assets: ReadonlyMap<ID, Asset>): string {
   switch (el.type) {
     case "text":
       return el.text;
     case "section":
       return el.label;
+    case "link":
+      return linkText(el);
     case "file":
       return assets.get(el.assetId)?.name ?? "";
     case "image": {

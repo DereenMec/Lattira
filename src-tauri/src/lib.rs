@@ -4,6 +4,7 @@ mod db;
 mod desktop;
 mod error;
 mod files;
+mod link;
 mod ocr;
 mod transfer;
 mod trash;
@@ -58,6 +59,8 @@ pub fn run() {
             trash::empty_trash,
             transfer::export_canvas,
             transfer::import_canvases,
+            link::fetch_link_preview,
+            link::open_url,
             desktop::set_global_shortcut,
             desktop::set_close_to_tray,
             desktop::set_tray_labels,

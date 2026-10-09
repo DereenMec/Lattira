@@ -1,15 +1,18 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { Asset, CanvasDay, CanvasMeta, ImportNode, Project, SearchHit, TrashItem, WorkspaceInfo } from "@/types/model";
+import type { Asset, CanvasDay, CanvasMeta, ImportNode, LinkPreview, Project, SearchHit, TrashItem, WorkspaceInfo } from "@/types/model";
 import { t } from "@/i18n";
 import type { Backend, ClipboardContent } from "./backend";
+import { reportImportProgress, type ImportProgressEvent } from "./importProgress";
 
 const toWindowsPath = (root: string, rel: string) => `${root}\\${rel.replaceAll("/", "\\")}`;
 
 /** 调用 src-tauri/src/commands.rs 中的命令。参数名由 Tauri 自动从 camelCase 转为 snake_case。 */
 export function createTauriBackend(): Backend {
   let root = "";
+
+  void listen<ImportProgressEvent>("import-progress", (e) => reportImportProgress(e.payload));
 
   const remember = (ws: WorkspaceInfo | null) => {
     if (ws) root = ws.path;
@@ -37,13 +40,15 @@ export function createTauriBackend(): Backend {
     loadCanvas: (id) => invoke<string>("load_canvas", { id }),
     saveCanvas: (id, content, index, changes) => invoke<CanvasMeta>("save_canvas", { id, content, index, changes }),
 
-    importPaths: (paths) => invoke<Asset[]>("import_paths", { paths }),
-    importTree: (paths) => invoke<ImportNode[]>("import_tree", { paths }),
-    async importBlobs(files) {
+    importPaths: (paths, task) => invoke<Asset[]>("import_paths", { paths, task }),
+    importTree: (paths, task) => invoke<ImportNode[]>("import_tree", { paths, task }),
+    async importBlobs(files, task) {
       const out: Asset[] = [];
-      for (const f of files) {
+      for (const [i, f] of files.entries()) {
+        const name = f.name || t("粘贴的图片.png");
+        if (task) reportImportProgress({ task, current: name, doneFiles: i, totalFiles: files.length, fraction: i / files.length });
         const bytes = new Uint8Array(await f.arrayBuffer());
-        out.push(await invoke<Asset>("import_bytes", { name: f.name || t("粘贴的图片.png"), bytes: Array.from(bytes) }));
+        out.push(await invoke<Asset>("import_bytes", { name, bytes: Array.from(bytes) }));
       }
       return out;
     },
@@ -83,6 +88,10 @@ export function createTauriBackend(): Backend {
         stop?.();
       };
     },
+
+    fetchLinkPreview: (url) => invoke<LinkPreview>("fetch_link_preview", { url }),
+    openUrl: (url) => invoke<void>("open_url", { url }),
+    workspaceFileUrl: (path) => convertFileSrc(toWindowsPath(root, path)),
 
     async exportCanvas(canvas) {
       const dest = await save({

@@ -22,6 +22,8 @@ interface Saved {
   shortcuts: Partial<Record<CommandId, string | null>>;
   /** 关闭主窗口时最小化到托盘（否则退出） */
   closeToTray: boolean;
+  /** 把链接放到画布上时访问网页，获取标题和预览图 */
+  linkPreviews: boolean;
 }
 
 interface SettingsState extends Saved {
@@ -33,6 +35,7 @@ interface SettingsState extends Saved {
   setCloseToTray(enabled: boolean): Promise<void>;
   setTheme(theme: Theme): void;
   setAutoCheckUpdates(enabled: boolean): void;
+  setLinkPreviews(enabled: boolean): void;
   /** 拖动分隔条时实时调整；persist 为 true 时（松手）才写入存储 */
   setPanelWidth(panel: Panel, width: number, persist?: boolean): void;
 }
@@ -44,6 +47,7 @@ const DEFAULTS: Saved = {
   closeToTray: true,
   theme: "system",
   autoCheckUpdates: true,
+  linkPreviews: true,
   sidebarWidth: PANEL_WIDTH.sidebar.default,
   inspectorWidth: PANEL_WIDTH.inspector.default,
 };
@@ -69,8 +73,8 @@ function applyTheme(theme: Theme) {
 
 export const useSettings = create<SettingsState>()((set, get) => {
   const persist = () => {
-    const { shortcuts, closeToTray, theme, autoCheckUpdates, sidebarWidth, inspectorWidth } = get();
-    const saved: Saved = { shortcuts, closeToTray, theme, autoCheckUpdates, sidebarWidth, inspectorWidth };
+    const { shortcuts, closeToTray, theme, autoCheckUpdates, linkPreviews, sidebarWidth, inspectorWidth } = get();
+    const saved: Saved = { shortcuts, closeToTray, theme, autoCheckUpdates, linkPreviews, sidebarWidth, inspectorWidth };
     try {
       localStorage.setItem(KEY, JSON.stringify(saved));
     } catch {
@@ -113,6 +117,11 @@ export const useSettings = create<SettingsState>()((set, get) => {
 
     setAutoCheckUpdates(autoCheckUpdates) {
       set({ autoCheckUpdates });
+      persist();
+    },
+
+    setLinkPreviews(linkPreviews) {
+      set({ linkPreviews });
       persist();
     },
 

@@ -4,13 +4,14 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufReader, Read};
-use std::path::Path;
+use std::io::{BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::clipboard;
@@ -470,6 +471,11 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn hash_file(path: &Path) -> Result<String> {
+    hash_file_with(path, |_| {})
+}
+
+/// 计算文件的 SHA-256，每读一块调用一次 on_read（读了多少字节）
+fn hash_file_with(path: &Path, mut on_read: impl FnMut(u64)) -> Result<String> {
     let mut reader = BufReader::new(fs::File::open(path)?);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
@@ -479,8 +485,26 @@ pub(crate) fn hash_file(path: &Path) -> Result<String> {
             break;
         }
         hasher.update(&buf[..n]);
+        on_read(n as u64);
     }
     Ok(hex(&hasher.finalize()))
+}
+
+/// 复制文件，每写一块调用一次 on_write
+fn copy_with(src: &Path, dest: &Path, mut on_write: impl FnMut(u64)) -> Result<()> {
+    let mut reader = fs::File::open(src)?;
+    let mut writer = fs::File::create(dest)?;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n])?;
+        on_write(n as u64);
+    }
+    writer.sync_all()?;
+    Ok(())
 }
 
 /// 为新文件在 assets/<YYYY-MM>/ 下分配一个不冲突的路径
@@ -540,27 +564,33 @@ pub(crate) fn skip_entry(name: &str) -> bool {
     name.starts_with('.') || name.eq_ignore_ascii_case("thumbs.db") || name.eq_ignore_ascii_case("desktop.ini")
 }
 
-fn count_files(path: &Path, total: &mut usize) -> Result<()> {
-    if path.is_file() {
-        *total += 1;
-    } else if path.is_dir() {
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            if !skip_entry(&entry.file_name().to_string_lossy()) {
-                count_files(&entry.path(), total)?;
-            }
-            if *total > MAX_IMPORT_FILES {
-                break;
-            }
-        }
-    }
-    Ok(())
+// ---------------------------------------------------------------------------
+// 按路径导入：先列出全部文件和大小，再逐个计算校验和、复制。
+// 校验和与复制都不持有工作区锁，导入大文件时保存画布、搜索等操作不会被卡住；
+// 过程中向前端发送进度（事件 import-progress）。
+// ---------------------------------------------------------------------------
+
+/// 导入进度事件，前端据此显示进度条，见 src/services/importProgress.ts
+pub const EVENT_IMPORT_PROGRESS: &str = "import-progress";
+
+/// 要导入的内容：文件（带大小），或文件夹
+pub(crate) enum ImportPlan {
+    File { path: PathBuf, size: u64 },
+    Folder { name: String, children: Vec<ImportPlan> },
 }
 
-/// 文件夹内：文件在前、子文件夹在后，各自按名称排序
-fn import_node(ws: &Workspace, path: &Path) -> Result<ImportNode> {
+fn too_many_files() -> Error {
+    Error::Invalid(format!("一次最多导入 {MAX_IMPORT_FILES} 个文件，请分批导入"))
+}
+
+/// 列出 path 下要导入的文件；文件夹内文件在前、子文件夹在后，各自按名称排序
+pub(crate) fn plan_import(path: &Path, count: &mut usize) -> Result<ImportPlan> {
     if path.is_file() {
-        return Ok(ImportNode::File { asset: import_file(ws, path)? });
+        *count += 1;
+        if *count > MAX_IMPORT_FILES {
+            return Err(too_many_files());
+        }
+        return Ok(ImportPlan::File { path: path.to_path_buf(), size: fs::metadata(path)?.len() });
     }
     let mut entries: Vec<_> = fs::read_dir(path)?
         .filter_map(|e| e.ok())
@@ -568,35 +598,209 @@ fn import_node(ws: &Workspace, path: &Path) -> Result<ImportNode> {
         .map(|e| e.path())
         .collect();
     entries.sort_by_key(|p| (p.is_dir(), p.file_name().map(|n| n.to_string_lossy().to_lowercase())));
-    let children = entries.iter().map(|p| import_node(ws, p)).collect::<Result<Vec<_>>>()?;
+    let children = entries.iter().map(|p| plan_import(p, count)).collect::<Result<Vec<_>>>()?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    Ok(ImportNode::Folder { name, children })
+    Ok(ImportPlan::Folder { name, children })
 }
 
-/// 导入文件和文件夹，保留文件夹结构
-#[tauri::command]
-pub async fn import_tree(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<ImportNode>> {
-    let mut total = 0;
-    for p in &paths {
-        count_files(Path::new(p), &mut total)?;
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImportProgressEvent<'a> {
+    task: &'a str,
+    /// 正在处理的文件名
+    current: &'a str,
+    done_files: usize,
+    total_files: usize,
+    /// 0～1
+    fraction: f64,
+}
+
+/// 导入进度。工作量按字节计：每个文件先读一遍算校验和，再读写一遍复制，共两倍大小；
+/// 已有相同内容的文件跳过复制，直接记满。
+/// 接收进度的回调；用回调而不是直接持有 AppHandle，单元测试不必链接 Tauri 的窗口运行时
+type ProgressSink = Box<dyn FnMut(&ImportProgressEvent) + Send>;
+
+pub(crate) struct ImportProgress {
+    task: String,
+    sink: Option<ProgressSink>,
+    total_files: usize,
+    done_files: usize,
+    total_work: u64,
+    work: u64,
+    file_start: u64,
+    current: String,
+    last_emit: Option<Instant>,
+}
+
+impl ImportProgress {
+    /// 发给前端的进度：task 为空时不发送
+    fn for_app(app: &AppHandle, task: Option<String>, plans: &[ImportPlan]) -> Self {
+        let app = app.clone();
+        let sink: Option<ProgressSink> =
+            task.is_some().then(|| Box::new(move |e: &ImportProgressEvent| drop(app.emit(EVENT_IMPORT_PROGRESS, e))) as ProgressSink);
+        Self::new(task.unwrap_or_default(), sink, plans)
     }
-    if total > MAX_IMPORT_FILES {
-        return Err(Error::Invalid(format!("一次最多导入 {MAX_IMPORT_FILES} 个文件，请分批导入")));
+
+    pub(crate) fn new(task: String, sink: Option<ProgressSink>, plans: &[ImportPlan]) -> Self {
+        fn sum(p: &ImportPlan, files: &mut usize, bytes: &mut u64) {
+            match p {
+                ImportPlan::File { size, .. } => {
+                    *files += 1;
+                    *bytes += size;
+                }
+                ImportPlan::Folder { children, .. } => children.iter().for_each(|c| sum(c, files, bytes)),
+            }
+        }
+        let (mut files, mut bytes) = (0, 0);
+        plans.iter().for_each(|p| sum(p, &mut files, &mut bytes));
+        Self {
+            task,
+            sink,
+            total_files: files,
+            done_files: 0,
+            total_work: bytes * 2,
+            work: 0,
+            file_start: 0,
+            current: String::new(),
+            last_emit: None,
+        }
     }
-    let (nodes, root) = state.with(|ws| {
-        let nodes = paths.iter().map(|p| import_node(ws, Path::new(p))).collect::<Result<Vec<_>>>()?;
-        Ok((nodes, ws.root.clone()))
+
+    fn start_file(&mut self, name: &str) {
+        self.current = name.to_string();
+        self.file_start = self.work;
+        self.emit(false);
+    }
+
+    fn add(&mut self, bytes: u64) {
+        self.work += bytes;
+        self.emit(false);
+    }
+
+    fn finish_file(&mut self, size: u64) {
+        self.work = self.file_start + size * 2;
+        self.done_files += 1;
+        self.emit(self.done_files == self.total_files);
+    }
+
+    fn fraction(&self) -> f64 {
+        if self.total_work == 0 {
+            return if self.total_files == 0 { 1.0 } else { self.done_files as f64 / self.total_files as f64 };
+        }
+        (self.work as f64 / self.total_work as f64).min(1.0)
+    }
+
+    /// 每 100 毫秒最多发一次，避免大量小文件时事件刷屏
+    fn emit(&mut self, force: bool) {
+        if self.sink.is_none() || (!force && self.last_emit.is_some_and(|t| t.elapsed() < Duration::from_millis(100))) {
+            return;
+        }
+        self.last_emit = Some(Instant::now());
+        let event = ImportProgressEvent {
+            task: &self.task,
+            current: &self.current,
+            done_files: self.done_files,
+            total_files: self.total_files,
+            fraction: self.fraction(),
+        };
+        if let Some(sink) = self.sink.as_mut() {
+            sink(&event);
+        }
+    }
+}
+
+/// 在开始导入时的那个工作区上执行；导入途中切换了工作区则中止
+fn with_root<T>(state: &AppState, root: &Path, f: impl FnOnce(&mut Workspace) -> Result<T>) -> Result<T> {
+    state.with(|ws| {
+        if ws.root != root {
+            return Err(Error::Invalid("工作区已切换，导入已中止".into()));
+        }
+        f(ws)
+    })
+}
+
+/// 导入一个文件，只在查重、分配文件名和登记时短暂持有工作区锁
+fn import_file_unlocked(state: &AppState, root: &Path, src: &Path, size: u64, progress: &mut ImportProgress) -> Result<Asset> {
+    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "文件".into());
+    progress.start_file(&name);
+    let hash = hash_file_with(src, |n| progress.add(n))?;
+    if let Some(existing) = with_root(state, root, |ws| get_asset(&ws.conn, "hash", &hash))? {
+        progress.finish_file(size);
+        return Ok(existing);
+    }
+    // 先建好空文件占住文件名，同时进行的另一次导入不会分到同一个名字
+    let dest = with_root(state, root, |ws| {
+        let dest = asset_destination(ws, &name)?;
+        fs::File::create(&dest)?;
+        Ok(dest)
     })?;
+    if let Err(e) = copy_with(src, &dest, |n| progress.add(n)) {
+        let _ = fs::remove_file(&dest);
+        return Err(e);
+    }
+    let asset = with_root(state, root, |ws| {
+        // 复制期间另一次导入可能已经登记了相同内容
+        if let Some(existing) = get_asset(&ws.conn, "hash", &hash)? {
+            let _ = fs::remove_file(&dest);
+            return Ok(existing);
+        }
+        register_asset(ws, &hash, &dest, &name)
+    });
+    if asset.is_err() {
+        let _ = fs::remove_file(&dest);
+    }
+    progress.finish_file(size);
+    asset
+}
+
+pub(crate) fn import_planned(state: &AppState, root: &Path, plan: &ImportPlan, progress: &mut ImportProgress) -> Result<ImportNode> {
+    Ok(match plan {
+        ImportPlan::File { path, size } => ImportNode::File { asset: import_file_unlocked(state, root, path, *size, progress)? },
+        ImportPlan::Folder { name, children } => ImportNode::Folder {
+            name: name.clone(),
+            children: children.iter().map(|c| import_planned(state, root, c, progress)).collect::<Result<Vec<_>>>()?,
+        },
+    })
+}
+
+/// 导入文件和文件夹，保留文件夹结构；task 不为空时发送进度事件
+#[tauri::command]
+pub async fn import_tree(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    task: Option<String>,
+) -> Result<Vec<ImportNode>> {
+    let root = state.with(|ws| Ok(ws.root.clone()))?;
+    let mut count = 0;
+    let plans = paths.iter().map(|p| plan_import(Path::new(p), &mut count)).collect::<Result<Vec<_>>>()?;
+    let mut progress = ImportProgress::for_app(&app, task, &plans);
+    let nodes = plans.iter().map(|p| import_planned(&state, &root, p, &mut progress)).collect::<Result<Vec<_>>>()?;
     ocr::schedule(app, root);
     Ok(nodes)
 }
 
+/// 按路径导入文件（不含文件夹）
 #[tauri::command]
-pub async fn import_paths(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<Asset>> {
-    let (assets, root) = state.with(|ws| {
-        let assets = paths.iter().map(|p| import_file(ws, Path::new(p))).collect::<Result<Vec<_>>>()?;
-        Ok((assets, ws.root.clone()))
-    })?;
+pub async fn import_paths(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    task: Option<String>,
+) -> Result<Vec<Asset>> {
+    let root = state.with(|ws| Ok(ws.root.clone()))?;
+    if let Some(dir) = paths.iter().map(Path::new).find(|p| !p.is_file()) {
+        return Err(Error::Invalid(format!("暂不支持导入文件夹：{}", dir.display())));
+    }
+    let mut count = 0;
+    let plans = paths.iter().map(|p| plan_import(Path::new(p), &mut count)).collect::<Result<Vec<_>>>()?;
+    let mut progress = ImportProgress::for_app(&app, task, &plans);
+    let mut assets = Vec::with_capacity(plans.len());
+    for plan in &plans {
+        if let ImportNode::File { asset } = import_planned(&state, &root, plan, &mut progress)? {
+            assets.push(asset);
+        }
+    }
     ocr::schedule(app, root);
     Ok(assets)
 }
@@ -1109,8 +1313,25 @@ mod tests {
         let ws_dir = dir.join("ws");
         fs::create_dir_all(&ws_dir).unwrap();
         let (ws, _) = Workspace::open(&ws_dir).unwrap();
+        let root = ws.root.clone();
+        let state = AppState::default();
+        *state.ws.lock().unwrap() = Some(ws);
 
-        let ImportNode::Folder { name, children } = import_node(&ws, &src).unwrap() else { panic!("应为文件夹") };
+        let mut count = 0;
+        let plan = plan_import(&src, &mut count).unwrap();
+        assert_eq!(count, 3);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_events = events.clone();
+        let sink: ProgressSink = Box::new(move |e: &ImportProgressEvent| sink_events.lock().unwrap().push((e.done_files, e.fraction)));
+        let mut progress = ImportProgress::new("t".into(), Some(sink), std::slice::from_ref(&plan));
+        let ImportNode::Folder { name, children } = import_planned(&state, &root, &plan, &mut progress).unwrap() else {
+            panic!("应为文件夹")
+        };
+        assert_eq!((progress.done_files, progress.fraction()), (3, 1.0));
+        // 第一次和最后一次进度一定会发出去，最后一次是 100%
+        let events = events.lock().unwrap();
+        assert_eq!(events.first().map(|e| e.0), Some(0));
+        assert_eq!(events.last().copied(), Some((3, 1.0)));
         assert_eq!(name, "资料");
         let names: Vec<String> = children
             .iter()
@@ -1120,8 +1341,26 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["a.txt", "b.txt", "[图纸]"]);
-        drop(ws);
+
+        // 再导入一次：内容相同的文件不再复制，assets 目录里没有多出文件
+        let count_assets = || walk_count(&root.join("assets"));
+        let before = count_assets();
+        let mut progress = ImportProgress::new(String::new(), None, std::slice::from_ref(&plan));
+        import_planned(&state, &root, &plan, &mut progress).unwrap();
+        assert_eq!(count_assets(), before);
+        assert_eq!(progress.fraction(), 1.0);
+
+        // 超过数量上限时在复制任何文件之前就报错
+        let mut count = MAX_IMPORT_FILES;
+        assert!(plan_import(&src, &mut count).is_err());
+        drop(state);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    fn walk_count(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .map(|rd| rd.flatten().map(|e| if e.path().is_dir() { walk_count(&e.path()) } else { 1 }).sum())
+            .unwrap_or(0)
     }
 
     #[test]

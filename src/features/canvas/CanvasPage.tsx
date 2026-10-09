@@ -43,7 +43,17 @@ export function CanvasActions({ meta }: { meta: CanvasMeta }) {
   );
 }
 
-export function CanvasPage({ canvasId, focusElementId, focusAssetId }: { canvasId: ID; focusElementId?: ID; focusAssetId?: ID }) {
+export function CanvasPage({
+  canvasId,
+  focusElementId,
+  focusAssetId,
+  findQuery,
+}: {
+  canvasId: ID;
+  focusElementId?: ID;
+  focusAssetId?: ID;
+  findQuery?: string;
+}) {
   const t = useT();
   const meta = useAppStore((s) => s.canvases.find((c) => c.id === canvasId));
   const inspectorOpen = useAppStore((s) => s.inspectorOpen);
@@ -53,7 +63,7 @@ export function CanvasPage({ canvasId, focusElementId, focusAssetId }: { canvasI
   return (
     <div className="page canvas-page">
       <div className="canvas-body">
-        <CanvasView canvasId={canvasId} focusElementId={focusElementId} focusAssetId={focusAssetId} />
+        <CanvasView canvasId={canvasId} focusElementId={focusElementId} focusAssetId={focusAssetId} findQuery={findQuery} />
         {inspectorOpen && (
           <>
             <Splitter panel="inspector" edge="left" />

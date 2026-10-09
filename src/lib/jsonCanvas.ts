@@ -3,7 +3,7 @@
  * 栖页独有的信息放在 `lattira` 扩展字段中，Obsidian 等工具打开时会忽略它们。
  */
 import { boundsOf } from "@/lib/geometry";
-import type { Asset, CanvasDoc, CanvasElement, CardColor, Edge, ID, Viewport } from "@/types/model";
+import type { Asset, CanvasDoc, CanvasElement, CardColor, Edge, ID, LinkElement, Viewport } from "@/types/model";
 
 interface JsonCanvasNode {
   id: string;
@@ -22,6 +22,8 @@ interface JsonCanvasNode {
     assetId?: ID;
     createdAt: number;
     updatedAt: number;
+    /** 链接卡片获取到的网页信息 */
+    link?: Pick<LinkElement, "title" | "description" | "siteName" | "image" | "icon">;
   };
 }
 
@@ -68,6 +70,10 @@ export function toJsonCanvas(doc: CanvasDoc, assets: ReadonlyMap<ID, Asset>): st
         return { ...base, type: "text", text: el.text };
       case "section":
         return { ...base, type: "group", label: el.label };
+      case "link": {
+        const { title, description, siteName, image, icon } = el;
+        return { ...base, type: "link", url: el.url, lattira: { ...base.lattira!, link: { title, description, siteName, image, icon } } };
+      }
       case "image":
       case "file":
         return {
@@ -118,7 +124,7 @@ export function fromJsonCanvas(json: string, canvasId: ID): CanvasDoc {
     } else if (n.type === "file" && n.lattira?.assetId) {
       elements.push({ ...common, type: kind === "image" ? "image" : "file", assetId: n.lattira.assetId });
     } else if (n.type === "link") {
-      elements.push({ ...common, type: "text", text: n.url ?? "" });
+      elements.push({ ...common, type: "link", url: n.url ?? "", ...n.lattira?.link });
     } else {
       // 文本节点，以及暂不能解析的外部文件节点（显示其路径）
       elements.push({ ...common, type: "text", text: n.text ?? n.file ?? "" });

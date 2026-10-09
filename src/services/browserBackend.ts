@@ -3,6 +3,7 @@ import { toLocalDate } from "@/lib/date";
 import { uuidv7 } from "@/lib/id";
 import type { Asset, CanvasDay, CanvasMeta, ID, Project, SearchHit, TrashItem, WorkspaceInfo } from "@/types/model";
 import { PROJECT_COLORS } from "@/types/model";
+import { reportImportProgress } from "./importProgress";
 import type { Backend, CopyPayload } from "./backend";
 
 /**
@@ -177,9 +178,10 @@ export function createBrowserBackend(): Backend {
     async importTree() {
       throw new Error(t("浏览器预览模式不支持按路径导入"));
     },
-    async importBlobs(files) {
+    async importBlobs(files, task) {
       const out: Asset[] = [];
-      for (const f of files) {
+      for (const [i, f] of files.entries()) {
+        if (task) reportImportProgress({ task, current: f.name, doneFiles: i, totalFiles: files.length, fraction: i / files.length });
         const buf = await f.arrayBuffer();
         const hash = await sha256(buf);
         let asset = state.assets.find((a) => a.hash === hash);
@@ -286,6 +288,17 @@ export function createBrowserBackend(): Backend {
     },
     subscribeAssetUpdates() {
       return () => {};
+    },
+
+    // 浏览器受跨域限制读不到其他网站的网页，链接卡片只显示网址
+    async fetchLinkPreview() {
+      return {};
+    },
+    async openUrl(url) {
+      window.open(url, "_blank", "noopener");
+    },
+    workspaceFileUrl() {
+      return "";
     },
 
     async exportCanvas(canvas) {

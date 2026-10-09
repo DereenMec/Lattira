@@ -1,4 +1,4 @@
-import { ArrowUpRight, ExternalLink, LocateFixed } from "lucide-react";
+import { ArrowUpRight, ExternalLink, LocateFixed, RefreshCw } from "lucide-react";
 import { useMemo } from "react";
 import { openContextMenu } from "@/features/menu/ContextMenu";
 import { assetEntries } from "@/features/menu/menus";
@@ -9,10 +9,11 @@ import { formatBytes, isImageMime, isOcrMime } from "@/lib/format";
 import { backend } from "@/services/backend";
 import { projectLabel, useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
+import { fetchPreview, openLink, useLinkFetching } from "./links";
 import { useSettings } from "@/store/settingsStore";
 import { CARD_COLORS, type Asset, type CanvasMeta, type CardColor, type ID } from "@/types/model";
 
-const TYPE_LABEL = { text: msg("文本卡片"), image: msg("图片"), file: msg("文件"), section: msg("文件夹") } as const;
+const TYPE_LABEL = { text: msg("文本卡片"), image: msg("图片"), file: msg("文件"), link: msg("链接"), section: msg("文件夹") } as const;
 
 /**
  * 当前画布引用的全部文件与图片；单击定位到卡片，双击打开，右键更多操作。
@@ -86,11 +87,12 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
   const assets = useAppStore((s) => s.assets);
   const projects = useAppStore((s) => s.projects);
   const width = useSettings((s) => s.inspectorWidth);
+  const fetching = useLinkFetching((s) => s.ids);
 
   if (!doc) return <aside className="inspector" style={{ width }} />;
   const { updateCanvas, navigate, showToast } = useAppStore.getState();
   const selected = doc.elements.filter((e) => selectedIds.includes(e.id));
-  const colorable = selected.filter((e) => e.type === "text" || e.type === "section");
+  const colorable = selected.filter((e) => e.type === "text" || e.type === "link" || e.type === "section");
 
   const setColor = (color: CardColor) =>
     useCanvasStore.getState().updateElements(Object.fromEntries(colorable.map((e) => [e.id, { color }])));
@@ -159,6 +161,40 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
             <dt>{t("修改于")}</dt>
             <dd>{formatRelative(selected[0].updatedAt)}</dd>
           </dl>
+          {selected[0].type === "link" &&
+            (() => {
+              const link = selected[0];
+              return (
+                <>
+                  <h3>{t("网页")}</h3>
+                  <dl className="props">
+                    {link.title && (
+                      <>
+                        <dt>{t("标题")}</dt>
+                        <dd className="break">{link.title}</dd>
+                      </>
+                    )}
+                    <dt>{t("网址")}</dt>
+                    <dd className="break mono">{link.url}</dd>
+                    {link.siteName && (
+                      <>
+                        <dt>{t("网站")}</dt>
+                        <dd className="break">{link.siteName}</dd>
+                      </>
+                    )}
+                  </dl>
+                  {link.description && <p className="link-inspector-desc">{link.description}</p>}
+                  <div className="btn-row">
+                    <button className="btn" onClick={() => void openLink(link.url)}>
+                      <ExternalLink size={14} /> {t("在浏览器中打开")}
+                    </button>
+                    <button className="btn" disabled={fetching.has(link.id)} onClick={() => void fetchPreview(link, true)}>
+                      <RefreshCw size={14} className={fetching.has(link.id) ? "spin" : undefined} /> {t("刷新预览")}
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
           {(selected[0].type === "image" || selected[0].type === "file") &&
             (() => {
               const asset = assets.get(selected[0].assetId);

@@ -7,7 +7,8 @@ import { PROJECT_COLORS } from "@/types/model";
 
 export type View =
   | { kind: "project"; projectId: ID }
-  | { kind: "canvas"; canvasId: ID; focusElementId?: ID; focusAssetId?: ID }
+  /** findQuery：从全局搜索跳过来时，打开画布内查找并高亮这个词 */
+  | { kind: "canvas"; canvasId: ID; focusElementId?: ID; focusAssetId?: ID; findQuery?: string }
   | { kind: "recent" }
   | { kind: "calendar" }
   | { kind: "assets" }

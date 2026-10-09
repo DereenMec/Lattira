@@ -7,6 +7,7 @@ import {
   AlignStartHorizontal,
   AlignStartVertical,
   Archive,
+  Folder,
   ArrowDownToLine,
   ArrowUpToLine,
   ClipboardCopy,
@@ -20,9 +21,11 @@ import {
   FolderInput,
   FolderOpen,
   FolderPlus,
+  FolderSymlink,
   Image as ImageIcon,
   Link,
   Pencil,
+  RefreshCw,
   Save,
   ScanText,
   Trash2,
@@ -30,10 +33,12 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { copySelection } from "@/features/canvas/clipboard";
+import { editLink, fetchPreview, openLink } from "@/features/canvas/links";
 import { exportCanvas, importCanvases } from "@/features/canvas/transfer";
 import { openProjectStyle } from "@/features/project/ProjectStyleDialog";
 import { ProjectIcon } from "@/features/project/projectIcons";
 import { t } from "@/i18n";
+import { boundsOf, contains, sectionAround, withContents } from "@/lib/geometry";
 import { confirmAction } from "@/services/confirm";
 import { backend } from "@/services/backend";
 import { projectLabel, useAppStore } from "@/store/appStore";
@@ -46,6 +51,7 @@ import {
   type CardColor,
   type ID,
   type Project,
+  type SectionElement,
 } from "@/types/model";
 import type { MenuEntry } from "./ContextMenu";
 import { promptText } from "./PromptDialog";
@@ -157,6 +163,43 @@ function colorEntry(onPick: (c: CardColor) => void, current?: CardColor): MenuEn
   };
 }
 
+/** 文件夹的显示名：嵌套时带上外层文件夹，如「资料 / 图纸」 */
+function folderPath(elements: CanvasElement[], sec: SectionElement): string {
+  const name = (s: SectionElement) => s.label.trim() || t("未命名文件夹");
+  const outer = elements
+    .filter((e): e is SectionElement => e.type === "section" && e.id !== sec.id && contains(e, sec))
+    .sort((a, b) => b.width * b.height - a.width * a.height);
+  return [...outer, sec].map(name).join(" / ");
+}
+
+/** 「移到文件夹」：列出画布上的其他文件夹（不含选中的、以及选中内容当前所在的那个） */
+function moveToFolderEntry(ids: ID[]): MenuEntry {
+  const doc = cv().doc!;
+  const moving = withContents(doc.elements, ids);
+  const box = boundsOf(doc.elements.filter((e) => moving.has(e.id)));
+  const current = box ? sectionAround(doc.elements, box, moving) : undefined;
+  const targets = doc.elements
+    .filter((e): e is SectionElement => e.type === "section" && !moving.has(e.id) && e.id !== current?.id)
+    .map((sec) => ({ sec, path: folderPath(doc.elements, sec) }))
+    .sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
+  return {
+    label: t("移到文件夹"),
+    icon: <FolderSymlink size={S} />,
+    disabled: targets.length === 0,
+    hint: targets.length === 0 ? t("没有其他文件夹") : undefined,
+    children: targets.length
+      ? targets.map(({ sec, path }) => ({
+          label: path,
+          icon: <Folder size={S} />,
+          onSelect: () => {
+            cv().moveIntoSection(ids, sec.id);
+            cv().requestFocus(sec.id, { select: false });
+          },
+        }))
+      : undefined,
+  };
+}
+
 const alignOptions = (): { mode: AlignMode; label: string; icon: ReactNode }[] => [
   { mode: "left", label: t("左对齐"), icon: <AlignStartVertical size={S} /> },
   { mode: "hcenter", label: t("水平居中"), icon: <AlignCenterVertical size={S} /> },
@@ -195,6 +238,22 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
         "separator",
         colorEntry(setColor([el]), el.color),
         "separator",
+        moveToFolderEntry(ids),
+        ...arrangeEntries(ids),
+        "separator",
+        { label: t("删除"), icon: <Trash2 size={S} />, hint: "Delete", danger: true, onSelect: () => removeElements(ids) },
+      ];
+    }
+    if (el.type === "link") {
+      return [
+        { label: t("在浏览器中打开"), icon: <ExternalLink size={S} />, hint: t("双击"), onSelect: () => void openLink(el.url) },
+        { label: t("复制网址"), icon: <Copy size={S} />, onSelect: () => void copyText(el.url, t("网址")) },
+        { label: t("修改网址…"), icon: <Pencil size={S} />, onSelect: () => void editLink(el) },
+        { label: t("刷新预览"), icon: <RefreshCw size={S} />, onSelect: () => void fetchPreview(el, true) },
+        "separator",
+        colorEntry(setColor([el]), el.color),
+        "separator",
+        moveToFolderEntry(ids),
         ...arrangeEntries(ids),
         "separator",
         { label: t("删除"), icon: <Trash2 size={S} />, hint: "Delete", danger: true, onSelect: () => removeElements(ids) },
@@ -208,6 +267,7 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
         { label: t("重命名"), icon: <Pencil size={S} />, hint: t("双击标题"), onSelect: () => cv().setEditing(el.id) },
         colorEntry(setColor([el]), el.color),
         "separator",
+        moveToFolderEntry(ids),
         { label: t("解散文件夹（保留卡片）"), icon: <Ungroup size={S} />, onSelect: () => cv().ungroup(el.id) },
         "separator",
         {
@@ -222,13 +282,14 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
     return [
       ...(asset ? assetEntries(asset) : []),
       "separator",
+      moveToFolderEntry(ids),
       ...arrangeEntries(ids),
       "separator",
       { label: t("从画布移除"), icon: <Trash2 size={S} />, hint: "Delete", danger: true, onSelect: () => removeElements(ids) },
     ];
   }
 
-  const colorable = els.filter((e) => e.type === "text" || e.type === "section");
+  const colorable = els.filter((e) => e.type === "text" || e.type === "link" || e.type === "section");
   const align = alignOptions();
   return [
     { label: t("放进文件夹"), icon: <FolderPlus size={S} />, hint: "Ctrl+G", onSelect: () => cv().groupSelection() },
@@ -252,6 +313,7 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
     },
     ...(colorable.length ? (["separator", colorEntry(setColor(colorable))] as MenuEntry[]) : []),
     "separator",
+    moveToFolderEntry(ids),
     ...arrangeEntries(ids),
     "separator",
     {
