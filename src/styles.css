@@ -2014,6 +2014,11 @@ mark.hit {
   table-layout: fixed;
   font-size: 13px;
 }
+.assets-page .asset-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
 .asset-table th {
   position: sticky;
   top: 0;
@@ -2071,6 +2076,17 @@ mark.hit {
   height: 72px;
   cursor: default;
 }
+.assets-page .asset-table td {
+  vertical-align: middle;
+  line-height: 22px;
+}
+.assets-page .asset-table tbody tr {
+  height: auto;
+}
+.asset-table tr[aria-hidden] td {
+  padding: 0;
+  border: 0;
+}
 .asset-table tbody tr:hover {
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
@@ -2083,6 +2099,14 @@ mark.hit {
   gap: 8px;
   color: var(--ink);
 }
+.assets-page .asset-table td.col-name {
+  display: table-cell;
+}
+.asset-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .asset-table td.col-name img {
   width: 18px;
   height: 18px;
@@ -2091,6 +2115,9 @@ mark.hit {
 .asset-table td.col-name span {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.asset-name-cell span {
+  min-width: 0;
 }
 .asset-table .col-size {
   text-align: right;
@@ -2101,7 +2128,7 @@ mark.hit {
 .asset-table td.col-location .is-unused {
   color: var(--warn);
 }
-/* 完整位置路径：长路径换行并可滚动，保留固定行高以支持列表虚拟化。 */
+/* 卡片视图保留紧凑的路径摘要。 */
 .asset-location {
   display: flex;
   flex-direction: column;
@@ -2115,9 +2142,6 @@ mark.hit {
   max-height: 54px;
   overflow: auto;
   line-height: 18px;
-}
-.asset-table .location-path {
-  max-height: 36px;
 }
 .asset-location .link-btn {
   min-width: 0;
@@ -2133,6 +2157,26 @@ mark.hit {
   cursor: pointer;
 }
 .asset-location .link-btn:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.location-line {
+  display: block;
+  width: 100%;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  line-height: 22px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.location-line:hover {
   color: var(--accent);
   text-decoration: underline;
 }

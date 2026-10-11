@@ -12,6 +12,31 @@ function module(file, names, dependencies = {}) {
   const context = vm.createContext({ console, crypto: webcrypto, TextEncoder, ...dependencies });
   return vm.runInContext(`${source}\n;({${names.join(",")}})`, context, { filename: file });
 }
+const variable = module("src/lib/variableRows.ts", ["rowOffsets", "visibleRows"]);
+test("mixed-height row windows preserve offsets at boundaries and after filtering", () => {
+  const heights = Array.from({ length: 1000 }, (_, i) => 10 + 22 * (1 + i % 4));
+  const offsets = variable.rowOffsets(heights);
+  for (const offset of [0, 32, 86, 164, 900, offsets.at(-1) - 200, offsets.at(-1) + 999]) {
+    const view = variable.visibleRows(offsets, offset, 200);
+    assert.equal(view.top + heights.slice(view.start, view.end).reduce((a, b) => a + b, 0) + view.bottom, offsets.at(-1));
+    assert.ok(view.start >= 0 && view.end <= 1000 && view.start < view.end);
+    assert.ok(view.top <= offset);
+    assert.ok(offsets[view.end] >= Math.min(offset + 200, offsets.at(-1)));
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(variable.visibleRows([0], 999, 200))), { start: 0, end: 0, top: 0, bottom: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(variable.visibleRows([0, 32], 999, 200))), { start: 0, end: 1, top: 0, bottom: 0 });
+  assert.equal(variable.visibleRows([0, 32, 86], 32, 1, 0).start, 1);
+});
+test("old saved location width is ignored while valid adjustable columns survive", () => {
+  let value = JSON.stringify({ name: 420, importedAt: 5, type: "bad", size: 100, location: 2000 });
+  const columns = module("src/features/assets/assetColumns.ts", ["readColumnWidths", "saveColumnWidths"], {
+    localStorage: { getItem: () => value, setItem: (_, next) => { value = next; } },
+  });
+  const widths = columns.readColumnWidths();
+  assert.deepEqual(JSON.parse(JSON.stringify(widths)), { name: 420, importedAt: 150, type: 120, size: 100 });
+  columns.saveColumnWidths(widths);
+  assert.equal(Object.hasOwn(JSON.parse(value), "location"), false);
+});
 const geometry = module("src/lib/geometry.ts", ["boundsOf", "contains", "center"]);
 const json = module("src/lib/jsonCanvas.ts", ["fromJsonCanvas", "toJsonCanvas"], { ...geometry, FOLDER_W: 260, FOLDER_H: 76 });
 const names = module("src/lib/names.ts", ["nameKey", "splitName", "uniqueName", "sanitizeName", "sanitizeFileName"]);

@@ -1,9 +1,9 @@
 import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import { useT } from "@/i18n";
-import { clampColumnWidth, COLUMN_SIZES, type AssetColumn } from "./assetColumns";
+import { clampColumnWidth, COLUMN_SIZES, type ResizableAssetColumn } from "./assetColumns";
 
 interface Props {
-  column: AssetColumn;
+  column: ResizableAssetColumn;
   label: string;
   width: number;
   onResize(width: number, persist: boolean): void;

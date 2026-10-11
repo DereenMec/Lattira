@@ -2,6 +2,7 @@ import { ArrowDown, ArrowUp, LayoutGrid, List, LocateFixed, Search, Trash2, X } 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { openContextMenu, type MenuEntry } from "@/features/menu/ContextMenu";
 import { useVirtualRows } from "@/lib/useVirtualRows";
+import { useVariableRows } from "@/lib/useVariableRows";
 import { modalOpen } from "@/lib/operations";
 import { AssetImage } from "./AssetImage";
 import { assetEntries } from "@/features/menu/menus";
@@ -15,7 +16,7 @@ import { projectLabel, useAppStore } from "@/store/appStore";
 import { dropCanvasCache, useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasMeta, ID, Project } from "@/types/model";
 import { loadLocationIndexes, type AssetLocation, type LocationIndex } from "./assetLocations";
-import { clampColumnWidth, readColumnWidths, saveColumnWidths, type AssetColumn } from "./assetColumns";
+import { clampColumnWidth, LOCATION_MIN_WIDTH, readColumnWidths, saveColumnWidths, type AssetColumn, type ResizableAssetColumn } from "./assetColumns";
 import { ColumnResizer } from "./ColumnResizer";
 
 type Filter = "all" | "image" | "document" | "unused";
@@ -106,6 +107,16 @@ function LocationCell({ asset, locations }: { asset: Asset; locations: AssetLoca
 
 const LAYOUT_KEY = "lattira.assets.layout";
 
+/** 每个引用占一行；路径长度不影响行高，完整路径保留在提示里。 */
+function LocationLines({ asset, locations }: { asset: Asset; locations: AssetLocation[] }) {
+  if (!locations.length) return <span className="is-unused">{asset.refCount ? t("回收站中的画布正在引用") : t("未被引用")}</span>;
+  return <div className="asset-location-lines">{locations.map((location) => (
+    <button key={`${location.canvasId}:${location.elementId ?? ""}`} className="location-line" title={location.label}
+      onClick={(e) => { e.stopPropagation(); reveal(asset, location); }}
+      onDoubleClick={(e) => e.stopPropagation()}>{location.label}</button>
+  ))}</div>;
+}
+
 const matchesFilter = (a: Asset, f: Filter) =>
   f === "all" || (f === "image" ? isImageMime(a.mime) : f === "document" ? !isImageMime(a.mime) : a.refCount === 0);
 
@@ -160,7 +171,7 @@ export function AssetLibrary() {
     }
   };
 
-  const resizeColumn = (column: AssetColumn, width: number, persist: boolean) => {
+  const resizeColumn = (column: ResizableAssetColumn, width: number, persist: boolean) => {
     const next = { ...columnWidthsRef.current, [column]: clampColumnWidth(column, width) };
     columnWidthsRef.current = next;
     setColumnWidths(next);
@@ -329,9 +340,10 @@ export function AssetLibrary() {
 
   const selectedSize = list.filter((a) => selected.has(a.id)).reduce((sum, a) => sum + a.size, 0);
   const gridRef = useRef<HTMLDivElement>(null);
-  const tableRef = useRef<HTMLTableElement>(null);
+  const tableRef = useRef<HTMLTableSectionElement>(null);
   const gridWindow = useVirtualRows(gridRef, layout === "grid" ? list.length : 0, 286, 180, 14);
-  const tableWindow = useVirtualRows(tableRef, layout === "list" ? list.length : 0, 72);
+  const tableHeights = useMemo(() => layout === "list" ? list.map((a) => 10 + 22 * Math.max(1, locations.get(a.id)?.length ?? 0)) : [], [layout, list, locations]);
+  const tableWindow = useVariableRows(tableRef, tableHeights);
 
   return (
     <div className="page assets-page" onClick={() => setSelected(new Set())}>
@@ -439,9 +451,9 @@ export function AssetLibrary() {
         </div>
       ) : (
         <div className="asset-table-wrap">
-          <table className="asset-table" ref={tableRef} style={{ width: COLUMNS.reduce((sum, c) => sum + columnWidths[c.key], 0) }}>
+          <table className="asset-table" style={{ minWidth: Object.values(columnWidths).reduce((sum, width) => sum + width, LOCATION_MIN_WIDTH) }}>
             <colgroup>
-              {COLUMNS.map((c) => <col key={c.key} style={{ width: columnWidths[c.key] }} />)}
+              {COLUMNS.map((c) => <col key={c.key} style={c.key === "location" ? undefined : { width: columnWidths[c.key] }} />)}
             </colgroup>
             <thead>
               <tr>
@@ -450,31 +462,34 @@ export function AssetLibrary() {
                     aria-sort={sort.key === c.key ? (sort.desc ? "descending" : "ascending") : "none"}>
                     <span>{t(c.label)}</span>
                     {sort.key === c.key && (sort.desc ? <ArrowDown size={12} /> : <ArrowUp size={12} />)}
-                    <ColumnResizer column={c.key} label={t(c.label)} width={columnWidths[c.key]}
-                      onResize={(width, persist) => resizeColumn(c.key, width, persist)} />
+                    {c.key !== "location" && <ColumnResizer column={c.key} label={t(c.label)} width={columnWidths[c.key]}
+                      onResize={(width, persist) => { if (c.key !== "location") resizeColumn(c.key, width, persist); }} />}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody>
+            <tbody ref={tableRef}>
               {tableWindow.top > 0 && <tr aria-hidden style={{ height: tableWindow.top }}><td colSpan={5} /></tr>}
               {list.slice(tableWindow.start, tableWindow.end).map((a, offset) => (
                 <tr
                   key={a.id}
+                  style={{ height: tableHeights[tableWindow.start + offset] }}
                   className={selected.has(a.id) ? "is-selected" : ""}
                   onClick={(e) => onItemClick(e, tableWindow.start + offset)}
                   onDoubleClick={() => void backend.openAsset(a)}
                   onContextMenu={(e) => showMenu(e, tableWindow.start + offset)}
                 >
                   <td className="col-name">
-                    <img src={fileIconUrl(a.name)} alt="" draggable={false} />
-                    <span title={a.name}>{a.name}</span>
+                    <div className="asset-name-cell">
+                      <img src={fileIconUrl(a.name)} alt="" draggable={false} />
+                      <span title={a.name}>{a.name}</span>
+                    </div>
                   </td>
                   <td className="col-date">{new Date(a.importedAt).toLocaleString("zh-CN", { hour12: false })}</td>
                   <td className="col-type">{typeLabel(a)}</td>
                   <td className="col-size">{formatBytes(a.size)}</td>
                   <td className="col-location">
-                    <LocationCell asset={a} locations={locations.get(a.id) ?? []} />
+                    <LocationLines asset={a} locations={locations.get(a.id) ?? []} />
                   </td>
                 </tr>
               ))}
