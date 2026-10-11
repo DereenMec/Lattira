@@ -41,7 +41,7 @@ export interface CanvasMeta {
   preview?: string | null;
 }
 
-export type ElementType = "text" | "image" | "file" | "link" | "section";
+export type ElementType = "text" | "image" | "file" | "link" | "folder";
 
 export const CARD_COLORS = ["default", "red", "orange", "yellow", "green", "blue", "purple"] as const;
 export type CardColor = (typeof CARD_COLORS)[number];
@@ -54,6 +54,8 @@ interface ElementBase {
   width: number;
   height: number;
   color?: CardColor;
+  /** 所在的文件夹；为空时直接放在画布上。文件夹里的元素不画在画布上，位置只在拖回画布时重新设定 */
+  parentId?: ID;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -95,13 +97,13 @@ export interface LinkPreview {
   icon?: string | null;
 }
 
-/** 分组框：带标题的区域，拖动时带着框内元素一起移动 */
-export interface SectionElement extends ElementBase {
-  type: "section";
+/** 文件夹：画布上的一张文件夹卡片，双击打开查看里面的内容（parentId 指向它的元素），可以嵌套 */
+export interface FolderElement extends ElementBase {
+  type: "folder";
   label: string;
 }
 
-export type CanvasElement = TextElement | ImageElement | FileElement | LinkElement | SectionElement;
+export type CanvasElement = TextElement | ImageElement | FileElement | LinkElement | FolderElement;
 
 export interface Edge {
   id: ID;
@@ -141,6 +143,14 @@ export interface Asset {
   ocrText?: string | null;
   /** 引用该资源的画布数 */
   refCount: number;
+}
+
+/** Windows 右键菜单「新建」里的一种文件，与 src-tauri/src/shellnew.rs 的 NewFileType 对应 */
+export interface NewFileType {
+  /** 扩展名，小写带点，如 ".docx" */
+  ext: string;
+  /** 显示名，如「Microsoft Word 文档」 */
+  name: string;
 }
 
 /** 导入结果的一项，与 src-tauri/src/commands.rs 的 ImportNode 对应：文件，或带着内容的文件夹 */

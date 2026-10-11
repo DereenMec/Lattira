@@ -30,21 +30,8 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import {
-  boundsOf,
-  center,
-  contains,
-  fitRect,
-  growSections,
-  intersects,
-  normalizeRect,
-  screenToWorld,
-  sectionAt,
-  withContents,
-  zoomAt,
-  type Point,
-  type Rect,
-} from "@/lib/geometry";
+import { canMoveInto, canvasAncestor, childCounts, isFolder, onCanvas, withAncestors } from "@/lib/folders";
+import { boundsOf, contains, fitRect, intersects, normalizeRect, screenToWorld, zoomAt, type Point, type Rect } from "@/lib/geometry";
 import { SNAP_PX, snapMove, snapResize, snapTargets, type Guide, type SnapTargets } from "@/lib/snap";
 import { openContextMenu } from "@/features/menu/ContextMenu";
 import { elementMenu } from "@/features/menu/menus";
@@ -55,8 +42,11 @@ import { useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasElement, ID, Viewport } from "@/types/model";
 import { EdgeLayer } from "./EdgeLayer";
 import { ElementView, type ElementHandlers } from "./ElementView";
-import { copySelection, pasteIntoCanvas } from "./clipboard";
+import { copySelection, cutSelection, pasteIntoCanvas } from "./clipboard";
 import { FindBar, findMatches } from "./FindBar";
+import { FolderPanel } from "./FolderPanel";
+import { newMenuEntry } from "./newFiles";
+import { openFromCanvas } from "./assetEditing";
 import { importedMessage, pathsKey, runImport } from "./importing";
 import { openLink, promptLink } from "./links";
 import { Minimap } from "./Minimap";
@@ -72,8 +62,8 @@ type Gesture =
       box: Rect;
       moved: boolean;
       targets?: SnapTargets;
-      /** 松手后要放进的文件夹，及拖动后的外框 */
-      drop?: { sectionId: ID; box: Rect };
+      /** 松手后要放进的文件夹 */
+      dropFolderId?: ID;
     }
   | { kind: "marquee"; start: Point; base: ID[] }
   | { kind: "resize"; id: ID; start: Point; rect: Rect; ratio?: number; targets: SnapTargets }
@@ -123,16 +113,38 @@ function cullIsStale(c: CullWindow, vp: Viewport, w: number, h: number): boolean
 const canvas = () => useCanvasStore.getState();
 const app = () => useAppStore.getState();
 
+/** 点了画布：文件夹窗口不再是当前操作的对象（此后 Ctrl+V 粘贴到画布上） */
+function releasePanelFocus() {
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && active.closest(".folder-panel")) active.blur();
+}
+
 const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLElement && !!target.closest("input, textarea, select, [contenteditable='true']");
 
-/** 命中测试：先找普通卡片（后画的在上），再找分组框 */
-function hitTest(elements: CanvasElement[], p: Point, exclude?: ID): CanvasElement | undefined {
-  const inside = (el: CanvasElement) =>
-    el.id !== exclude && p.x >= el.x && p.x <= el.x + el.width && p.y >= el.y && p.y <= el.y + el.height;
-  const cards = elements.filter((e) => e.type !== "section");
-  for (let i = cards.length - 1; i >= 0; i--) if (inside(cards[i])) return cards[i];
-  return elements.find((e) => e.type === "section" && inside(e));
+/** 命中测试：画布上点 p 处最上层的元素（后画的在上） */
+function hitTest(elements: CanvasElement[], p: Point, exclude?: ReadonlySet<ID>): CanvasElement | undefined {
+  for (let i = elements.length - 1; i >= 0; i--) {
+    const el = elements[i];
+    if (el.parentId || exclude?.has(el.id)) continue;
+    if (p.x >= el.x && p.x <= el.x + el.width && p.y >= el.y && p.y <= el.y + el.height) return el;
+  }
+  return undefined;
+}
+
+/** 画布上点 p 处的文件夹卡片 */
+function folderAt(elements: CanvasElement[], p: Point, exclude?: ReadonlySet<ID>): ID | undefined {
+  const hit = hitTest(elements, p, exclude);
+  return hit && isFolder(hit) ? hit.id : undefined;
+}
+
+/** 屏幕坐标处的文件夹窗口：指着窗口里的子文件夹时是它，否则是窗口打开的文件夹 */
+function panelFolderAt(clientX: number, clientY: number): ID | undefined {
+  const hit = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+  const panel = hit?.closest<HTMLElement>(".folder-panel");
+  if (!panel) return undefined;
+  const sub = hit!.closest<HTMLElement>("[data-fp-folder], [data-fp-crumb]");
+  return sub?.dataset.fpFolder ?? sub?.dataset.fpCrumb ?? canvas().folderView?.id;
 }
 
 interface Props {
@@ -164,7 +176,8 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   const [marquee, setMarquee] = useState<Rect | null>(null);
   const [pendingEdge, setPendingEdge] = useState<{ fromId: ID; to: Point } | null>(null);
   const [guides, setGuides] = useState<Guide[]>(NO_GUIDES);
-  const [dropSectionId, setDropSectionId] = useState<ID | null>(null);
+  const [dropFolderId, setDropFolderId] = useState<ID | null>(null);
+  const folderView = useCanvasStore((s) => s.folderView);
   // 按住方向键连续微调时合并成一步撤销，松开方向键时结束
   const nudging = useRef(false);
   const [panning, setPanning] = useState(false);
@@ -222,13 +235,20 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   // 从搜索结果跳转过来时，把目标卡片移到视口中央并高亮
   useEffect(() => {
     if (!loaded || (!focusElementId && !focusAssetId) || size.w === 0) return;
-    const el = canvas().doc?.elements.find(
+    const elements = canvas().doc?.elements ?? [];
+    const hits = elements.filter(
       (e) => e.id === focusElementId || (!!focusAssetId && "assetId" in e && e.assetId === focusAssetId),
     );
+    // 同一个文件既在画布上又在文件夹里时，优先定位画布上的
+    const el = hits.find(onCanvas) ?? hits[0];
     if (!el) return;
-    canvas().setViewport(fitRect(el, size.w, size.h, 160, 1));
-    canvas().select([el.id]);
-    setHighlightId(el.id);
+    // 在文件夹里的：定位到画布上包含它的文件夹，并打开它所在的文件夹窗口
+    const shown = canvasAncestor(new Map(elements.map((e) => [e.id, e])), el.id);
+    if (!shown) return;
+    canvas().setViewport(fitRect(shown, size.w, size.h, 160, 1));
+    canvas().select([shown.id]);
+    setHighlightId(shown.id);
+    if (el.parentId) canvas().openFolder(el.parentId, el.id);
     if (findQuery?.trim()) {
       // nav 不变：不再跳到第一处命中，停在搜索结果对应的卡片上；序号等结果算出来后再对齐
       setFind((f) => ({ ...f, open: true, query: findQuery.trim(), index: 0 }));
@@ -259,10 +279,21 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   const snapTargetsExcept = useCallback(
     (exclude: Set<ID>) => {
       const view = viewRect(canvas().viewport, size.w, size.h);
-      return snapTargets((canvas().doc?.elements ?? []).filter((el) => !exclude.has(el.id) && intersects(view, el)));
+      return snapTargets(
+        (canvas().doc?.elements ?? []).filter((el) => onCanvas(el) && !exclude.has(el.id) && intersects(view, el)),
+      );
     },
     [size],
   );
+
+  /** 粘贴的目标：文件夹窗口有焦点（点过窗口里面），或鼠标停在窗口上时，粘贴进窗口打开的文件夹；否则粘贴到画布上 */
+  const pasteFolder = useCallback((): ID | undefined => {
+    const open = canvas().folderView?.id;
+    if (!open) return undefined;
+    const p = lastPointer.current;
+    const hovered = p && document.elementFromPoint(p.clientX, p.clientY)?.closest(".folder-panel");
+    return hovered || document.activeElement?.closest(".folder-panel") ? open : undefined;
+  }, []);
 
   const endNudge = useCallback(() => {
     if (!nudging.current) return;
@@ -270,20 +301,35 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
     canvas().endGesture();
   }, []);
 
+  /** 闪一下画布上的元素（文件夹里的不处理） */
+  const flash = useCallback((id: ID) => {
+    const el = canvas().doc?.elements.find((e) => e.id === id);
+    if (!el || !onCanvas(el)) return;
+    setHighlightId(id);
+    window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => setHighlightId(null), 1600);
+  }, []);
+
   // ---- 导入文件 ----
-  const placeAssets = useCallback(async (load: (task: string) => Promise<Asset[]>, at: Point) => {
+  /** 导入文件放到画布上，左上角在 at；parentId 不为空时放进那个文件夹 */
+  const placeAssets = useCallback(async (load: (task: string) => Promise<Asset[]>, at: Point, parentId?: ID) => {
     try {
       const imported = await runImport(load, { done: (a) => importedMessage(a.length) });
       if (!imported?.length) return;
       app().addAssets(imported);
-      canvas().addElements(elementsForAssets(imported, at));
+      const cards = elementsForAssets(imported, at).map((el) => (parentId ? { ...el, parentId } : el));
+      canvas().addElements(cards, { select: !parentId });
+      if (parentId) {
+        flash(parentId);
+        canvas().showInOpenFolder(parentId, cards.map((c) => c.id));
+      }
     } catch (e) {
       app().showToast(t("导入失败：{error}", { error: String(e) }));
     }
   }, []);
 
-  /** 按路径导入文件和文件夹：文件夹变成分组框，里面的文件按网格排好 */
-  const placeTree = useCallback(async (paths: string[], at: Point) => {
+  /** 按路径导入文件和文件夹：文件夹变成文件夹卡片，里面的内容放进去；parentId 不为空时全部放进那个文件夹 */
+  const placeTree = useCallback(async (paths: string[], at: Point, parentId?: ID) => {
     try {
       const nodes = await runImport((task) => backend.importTree(paths, task), {
         key: pathsKey(paths),
@@ -293,14 +339,19 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       const assets = assetsInTree(nodes);
       if (assets.length === 0 && nodes.length === 0) return;
       app().addAssets(assets);
-      canvas().addElements(elementsForTree(nodes, at));
+      const added = elementsForTree(nodes, at, parentId);
+      canvas().addElements(added, { select: !parentId });
+      if (parentId) {
+        flash(parentId);
+        canvas().showInOpenFolder(parentId, added.filter((el) => el.parentId === parentId).map((el) => el.id));
+      }
     } catch (e) {
       app().showToast(t("导入失败：{error}", { error: String(e) }));
     }
   }, []);
 
-  /** 选择文件（或文件夹）放到画布上；不指定位置时放在视口中央 */
-  const pickFiles = useCallback(async (where?: Point, folders = false) => {
+  /** 选择文件（或文件夹）放到画布上；不指定位置时放在视口中央；parentId 不为空时放进那个文件夹 */
+  const pickFiles = useCallback(async (where?: Point, folders = false, parentId?: ID) => {
     if (!canvas().doc) return;
     const at = where ?? viewCenterWorld();
     if (backend.kind === "tauri") {
@@ -310,7 +361,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         title: folders ? t("选择要放到画布上的文件夹") : t("选择要放到画布上的文件"),
       });
       const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
-      if (paths.length) await placeTree(paths, at);
+      if (paths.length) await placeTree(paths, at, parentId);
     } else if (folders) {
       app().showToast(t("浏览器预览模式不支持按路径导入"));
     } else {
@@ -319,11 +370,27 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       input.multiple = true;
       input.onchange = () => {
         const files = Array.from(input.files ?? []);
-        if (files.length) void placeAssets((task) => backend.importBlobs(files, task), at);
+        if (files.length) void placeAssets((task) => backend.importBlobs(files, task), at, parentId);
       };
       input.click();
     }
   }, [placeAssets, placeTree, viewCenterWorld]);
+
+  // ---- 文件夹窗口用到的坐标换算 ----
+  /** 屏幕坐标处是否是画布上可以放东西的地方（不在工具栏、小地图、查找栏、文件夹窗口上） */
+  const canvasPointAt = useCallback(
+    (clientX: number, clientY: number): Point | null => {
+      const root = containerRef.current;
+      const hit = document.elementFromPoint(clientX, clientY);
+      if (!root || !hit || !root.contains(hit) || hit.closest(".canvas-toolbar, .minimap, .find-bar, .folder-panel")) return null;
+      return toWorld({ clientX, clientY });
+    },
+    [toWorld],
+  );
+  const canvasFolderAt = useCallback(
+    (clientX: number, clientY: number) => folderAt(canvas().doc?.elements ?? [], toWorld({ clientX, clientY })) ?? null,
+    [toWorld],
+  );
 
   // 桌面端：系统文件拖放由 Tauri 接管，拿到的是绝对路径
   useEffect(() => {
@@ -339,8 +406,11 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
           setDropActive(false);
           if (!canvas().doc || p.paths.length === 0) return;
           const ratio = window.devicePixelRatio || 1;
-          const at = toWorld({ clientX: p.position.x / ratio, clientY: p.position.y / ratio });
-          void placeTree(p.paths, at);
+          const client = { clientX: p.position.x / ratio, clientY: p.position.y / ratio };
+          const at = toWorld(client);
+          // 拖到文件夹窗口或画布上的文件夹卡片上：导入到那个文件夹里
+          const into = panelFolderAt(client.clientX, client.clientY) ?? folderAt(canvas().doc!.elements, at);
+          void placeTree(p.paths, at, into);
         }
       })
       .then((fn) => {
@@ -355,7 +425,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
 
   // ---- 视口操作 ----
   const fitAll = useCallback(() => {
-    const b = boundsOf(canvas().doc?.elements ?? []);
+    const b = boundsOf((canvas().doc?.elements ?? []).filter(onCanvas));
     if (b) canvas().setViewport(fitRect(b, size.w, size.h));
   }, [size]);
 
@@ -371,7 +441,8 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
     const node = containerRef.current;
     if (!node) return;
     const onWheel = (e: WheelEvent) => {
-      if (isTyping(e.target) || !canvas().doc) return;
+      // 文件夹窗口里的滚动留给窗口自己
+      if (isTyping(e.target) || !canvas().doc || (e.target as HTMLElement).closest?.(".folder-panel")) return;
       const vp = canvas().viewport;
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 16 : 1;
@@ -413,7 +484,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
           s.beginGesture();
           nudging.current = true;
         }
-        const moving = withContents(s.doc!.elements, s.selectedIds);
+        const moving = new Set(s.selectedIds);
         const patches: Record<ID, Point> = {};
         for (const el of s.doc!.elements) {
           if (moving.has(el.id)) patches[el.id] = { x: el.x + nudge[0] * step, y: el.y + nudge[1] * step };
@@ -440,7 +511,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         s.groupSelection();
       } else if (mod && key === "a") {
         e.preventDefault();
-        s.select(s.doc!.elements.map((el) => el.id));
+        s.select(s.doc!.elements.filter(onCanvas).map((el) => el.id));
       } else if (mod && (key === "=" || key === "+")) {
         e.preventDefault();
         zoomBy(1.25);
@@ -453,24 +524,31 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       } else if (e.shiftKey && e.code === "Digit1") {
         fitAll();
       } else if (key === "escape") {
-        s.select([]);
+        if (s.selectedIds.length === 0 && s.folderView) s.openFolder(null);
+        else s.select([]);
+      } else if (key === "f2" && s.selectedIds.length === 1) {
+        const el = s.doc!.elements.find((x) => x.id === s.selectedIds[0]);
+        if (el?.type === "folder") {
+          e.preventDefault();
+          s.setEditing(el.id);
+        }
       } else if (key === "enter" && s.selectedIds.length === 1) {
         const el = s.doc!.elements.find((x) => x.id === s.selectedIds[0]);
         if (el?.type === "text") {
           e.preventDefault();
           s.openEditor(el.id);
-        } else if (el?.type === "section") {
+        } else if (el?.type === "folder") {
           e.preventDefault();
-          s.setEditing(el.id);
+          s.openFolder(el.id);
         } else if (el?.type === "link") {
           e.preventDefault();
           void openLink(el.url);
         }
-      } else if (mod && key === "c" && s.selectedIds.length > 0) {
+      } else if (mod && (key === "c" || key === "x") && s.selectedIds.length > 0) {
         // 页面里有选中的文字（如检查器中的识别结果）时，保留浏览器的复制文字
         if (window.getSelection()?.toString()) return;
         e.preventDefault();
-        void copySelection();
+        void (key === "x" ? cutSelection() : copySelection());
       } else if (mod && key === "d") {
         e.preventDefault();
         s.duplicate(s.selectedIds);
@@ -491,7 +569,11 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         files: Array.from(e.clipboardData?.files ?? []),
         text: e.clipboardData?.getData("text/plain") ?? "",
       };
-      void pasteIntoCanvas(pasteAnchor(), fallback);
+      const folder = pasteFolder();
+      void pasteIntoCanvas(pasteAnchor(), fallback, folder).then((ids) => {
+        // 在窗口里选中粘贴进来的
+        if (folder && ids.length) canvas().openFolder(folder, ids);
+      });
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -505,7 +587,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       window.removeEventListener("blur", endNudge);
       endNudge();
     };
-  }, [fitAll, zoomBy, viewCenterWorld, pasteAnchor, endNudge]);
+  }, [fitAll, zoomBy, viewCenterWorld, pasteAnchor, pasteFolder, endNudge]);
 
   // ---- 指针手势 ----
   const capture = (e: ReactPointerEvent) => {
@@ -519,6 +601,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   const onBackgroundPointerDown = (e: ReactPointerEvent) => {
     if (!canvas().doc) return;
     endNudge();
+    releasePanelFocus();
     if (e.button === 1 || (e.button === 0 && spaceHeld.current)) {
       e.preventDefault();
       gesture.current = { kind: "pan", start: toLocal(e), vp: canvas().viewport };
@@ -539,6 +622,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       if (e.button !== 0 || spaceHeld.current) return; // 交给背景处理平移
       e.stopPropagation();
       endNudge();
+      releasePanelFocus();
       const s = canvas();
       if (!s.doc || s.editingId === id) return;
       if (e.shiftKey) {
@@ -550,10 +634,9 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         s.select([id]);
         ids = [id];
       }
-      // 拖动分组框时，带上框内的元素
-      const moving = withContents(s.doc.elements, ids);
+      const moving = new Set(ids);
       const origins = new Map<ID, Point>();
-      const movingEls = s.doc.elements.filter((el) => moving.has(el.id));
+      const movingEls = s.doc.elements.filter((el) => moving.has(el.id) && onCanvas(el));
       for (const el of movingEls) origins.set(el.id, { x: el.x, y: el.y });
       // 真正拖动后才捕获指针：过早捕获会让双击事件落到画布背景上
       gesture.current = { kind: "drag", start: toWorld(e), origins, box: boundsOf(movingEls)!, moved: false };
@@ -579,12 +662,12 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       const el = canvas().doc?.elements.find((x) => x.id === id);
       if (!el) return;
       if (el.type === "text") canvas().openEditor(id);
-      else if (el.type === "section") canvas().setEditing(id);
+      else if (el.type === "folder") canvas().openFolder(id);
       else if (el.type === "link") void openLink(el.url);
       else {
         const asset = app().assets.get(el.assetId);
         if (!asset) app().showToast(t("找不到这个文件"));
-        else void backend.openAsset(asset).catch((err) => app().showToast(t("无法打开文件：{error}", { error: String(err) })));
+        else void openFromCanvas(asset);
       }
     },
     onContextMenu(e, id) {
@@ -604,7 +687,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         } else if (value !== el.text) {
           s.updateElements({ [id]: { text: value } });
         }
-      } else if (el.type === "section" && value !== el.label) {
+      } else if (el.type === "folder" && value !== el.label) {
         s.updateElements({ [id]: { label: value } });
       }
     },
@@ -657,21 +740,18 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         const patches: Record<ID, Point> = {};
         for (const [id, o] of g.origins) patches[id] = { x: o.x + dx + sx, y: o.y + dy + sy };
         s.updateDuringGesture(patches);
-        // 中心落进了别的文件夹，或者会超出所在的文件夹：高亮它，松手时放进去并按需扩大
-        const box = { ...g.box, x: g.box.x + dx + sx, y: g.box.y + dy + sy };
+        // 指针移到文件夹卡片或文件夹窗口上：高亮它，松手时放进去。按住 Alt 时不放进文件夹
         const moving = new Set(g.origins.keys());
-        const section = e.altKey ? undefined : sectionAt(s.doc.elements, center(box), moving);
-        const into = section && (!contains(section, g.box) || !contains(section, box)) ? section : undefined;
-        g.drop = into ? { sectionId: into.id, box } : undefined;
-        setDropSectionId(into?.id ?? null);
+        let into = e.altKey ? undefined : (panelFolderAt(e.clientX, e.clientY) ?? folderAt(s.doc.elements, w, moving));
+        if (into && !canMoveInto(s.doc.elements, moving, into)) into = undefined;
+        g.dropFolderId = into;
+        setDropFolderId(into ?? null);
         break;
       }
       case "marquee": {
         const r = normalizeRect(g.start, toWorld(e));
         setMarquee(r);
-        const hit = s.doc.elements
-          .filter((el) => (el.type === "section" ? contains(r, el) : intersects(r, el)))
-          .map((el) => el.id);
+        const hit = s.doc.elements.filter((el) => onCanvas(el) && intersects(r, el)).map((el) => el.id);
         s.select([...new Set([...g.base, ...hit])]);
         break;
       }
@@ -701,43 +781,47 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
     const s = canvas();
     if (!g || !s.doc) return;
     setGuides(NO_GUIDES);
-    setDropSectionId(null);
+    setDropFolderId(null);
     if (g.kind === "drag" && g.moved) {
-      if (g.drop) {
-        const grow = growSections(s.doc.elements, g.drop.sectionId, g.drop.box, new Set(g.origins.keys()));
-        if (Object.keys(grow).length) s.updateDuringGesture(grow);
+      const into = g.dropFolderId;
+      if (into) {
+        // 卡片先回到原位再放进文件夹，撤销时一步回到拖动前
+        s.cancelGesture();
+        if (s.moveIntoFolder([...g.origins.keys()], into)) flash(into);
+      } else {
+        s.endGesture();
       }
-      s.endGesture();
     }
     else if (g.kind === "resize") s.endGesture();
     else if (g.kind === "marquee") setMarquee(null);
     else if (g.kind === "pan") setPanning(false);
     else if (g.kind === "connect") {
       setPendingEdge(null);
-      const target = hitTest(s.doc.elements, toWorld(e), g.fromId);
+      const target = hitTest(s.doc.elements, toWorld(e), new Set([g.fromId]));
       if (target) s.addEdge(g.fromId, target.id);
     }
   };
 
   const onDoubleClick = (e: ReactMouseEvent) => {
-    if (!canvas().doc || (e.target as HTMLElement).closest("[data-element-id], .canvas-toolbar, .minimap")) return;
+    if (!canvas().doc || (e.target as HTMLElement).closest("[data-element-id], .canvas-toolbar, .minimap, .folder-panel")) return;
     canvas().addElements([newTextCard(toWorld(e))], { edit: true });
   };
 
   // ---- 右键菜单：画布空白处与连线 ----
   const onBackgroundMenu = (e: ReactMouseEvent) => {
-    if (!canvas().doc || (e.target as HTMLElement).closest("[data-element-id], .canvas-toolbar, .minimap, .find-bar")) return;
+    if (!canvas().doc || (e.target as HTMLElement).closest("[data-element-id], .canvas-toolbar, .minimap, .find-bar, .folder-panel"))
+      return;
     const at = toWorld(e);
     canvas().select([]);
     openContextMenu(e, [
-      {
-        label: t("在此新建文本卡片"),
-        icon: <StickyNote size={15} />,
-        hint: t("双击"),
-        onSelect: () => canvas().addElements([newTextCard(at)], { edit: true }),
-      },
-      { label: t("在此新建空文件夹"), icon: <FolderPlus size={15} />, onSelect: () => canvas().addElements([newFolder(at)], { edit: true }) },
-      { label: t("在此添加链接…"), icon: <Link2 size={15} />, onSelect: () => void promptLink(at) },
+      // 新建的卡片、文件夹、链接和文件都在这里，与 Windows 右键菜单「新建」对应
+      newMenuEntry({
+        at,
+        textHint: t("双击"),
+        text: () => canvas().addElements([newTextCard(at)], { edit: true }),
+        folder: () => canvas().addElements([newFolder(at)], { edit: true }),
+        link: () => void promptLink(at),
+      }),
       "separator",
       { label: t("在此插入文件…"), icon: <Paperclip size={15} />, onSelect: () => void pickFiles(at) },
       { label: t("从电脑导入文件夹…"), icon: <FolderOpen size={15} />, onSelect: () => void pickFiles(at, true) },
@@ -752,7 +836,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         label: t("全选"),
         icon: <BoxSelect size={15} />,
         hint: "Ctrl+A",
-        onSelect: () => canvas().select(canvas().doc!.elements.map((el) => el.id)),
+        onSelect: () => canvas().select(canvas().doc!.elements.filter(onCanvas).map((el) => el.id)),
       },
       { label: t("显示全部内容"), icon: <Maximize size={15} />, hint: "Shift+1", onSelect: fitAll },
       {
@@ -814,11 +898,14 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
     [elements, assets, find.open, find.query],
   );
 
-  /** 把元素移到视口中央（缩得太小时放大到 100%），选中并闪一下 */
+  /** 把元素移到视口中央（缩得太小时放大到 100%），选中并闪一下；在文件夹里的，定位到文件夹并打开它所在的文件夹窗口 */
   const revealElement = useCallback(
     (id: ID, select = true) => {
-      const el = canvas().doc?.elements.find((e) => e.id === id);
-      if (!el || size.w === 0) return;
+      const all = canvas().doc?.elements ?? [];
+      const target = all.find((e) => e.id === id);
+      if (!target || size.w === 0) return;
+      const el = target.parentId ? canvasAncestor(new Map(all.map((e) => [e.id, e])), id) : target;
+      if (!el) return;
       const vp = canvas().viewport;
       const zoom = vp.zoom < 0.5 ? 1 : vp.zoom;
       canvas().setViewport({
@@ -826,12 +913,11 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         x: size.w / 2 - (el.x + el.width / 2) * zoom,
         y: size.h / 2 - (el.y + el.height / 2) * zoom,
       });
-      if (select) canvas().select([id]);
-      setHighlightId(id);
-      window.clearTimeout(highlightTimer.current);
-      highlightTimer.current = window.setTimeout(() => setHighlightId(null), 1600);
+      if (select) canvas().select([el.id]);
+      flash(el.id);
+      if (target.parentId) canvas().openFolder(target.parentId, target.id);
     },
-    [size],
+    [size, flash],
   );
 
   // 输入查询或按上一个 / 下一个时定位；编辑画布导致结果变化时不跳，以免打断用户
@@ -850,10 +936,19 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const matchSet = useMemo(() => new Set(matches), [matches]);
+  // 命中的元素和包含它们的各层文件夹：画布上的文件夹卡片、窗口里的子文件夹据此标出「里面有命中」
+  const matchPath = useMemo(() => withAncestors(elements ?? [], matches), [elements, matches]);
+  const currentPath = useMemo(
+    () => withAncestors(elements ?? [], find.open && currentMatch ? [currentMatch] : []),
+    [elements, find.open, currentMatch],
+  );
+  // 文件夹里的内容不画在画布上
+  const shown = useMemo(() => elements?.filter(onCanvas) ?? [], [elements]);
+  const counts = useMemo(() => childCounts(elements ?? []), [elements]);
   const visible = useMemo(() => {
-    if (!doc || !cull) return [];
-    return doc.elements.filter((el) => intersects(cull.rect, el) || selectedSet.has(el.id) || el.id === editingId);
-  }, [doc, cull, selectedSet, editingId]);
+    if (!cull) return [];
+    return shown.filter((el) => intersects(cull.rect, el) || selectedSet.has(el.id) || el.id === editingId);
+  }, [shown, cull, selectedSet, editingId]);
 
   if (!doc || !loaded) return <div className="canvas-root is-loading" ref={containerRef} />;
 
@@ -869,10 +964,11 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         showHandles={single === el.id && !lod}
         editing={editingId === el.id}
         highlighted={highlightId === el.id}
-        matched={matchSet.has(el.id)}
+        matched={matchPath.has(el.id)}
         findQuery={matchSet.has(el.id) ? find.query : undefined}
-        currentMatch={find.open && el.id === currentMatch}
-        dropTarget={dropSectionId === el.id}
+        currentMatch={currentPath.has(el.id)}
+        dropTarget={dropFolderId === el.id}
+        itemCount={el.type === "folder" ? (counts.get(el.id) ?? 0) : undefined}
         lod={lod}
         asset={asset}
         assetUrl={asset && el.type === "image" ? backend.assetUrl(asset) : undefined}
@@ -886,6 +982,8 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       ref={containerRef}
       className={`canvas-root${panning ? " is-panning" : ""}${dropActive ? " is-drop-target" : ""}`}
       onPointerDown={onBackgroundPointerDown}
+      // 按下时也记一次位置：决定粘贴到画布还是文件夹窗口时不依赖之前有没有移动过鼠标
+      onPointerDownCapture={(e) => (lastPointer.current = { clientX: e.clientX, clientY: e.clientY })}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
@@ -895,7 +993,6 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
     >
       {/* transform 由上面的视口订阅直接写入，不经过 React */}
       <div className="canvas-world" ref={worldRef}>
-        {visible.filter((e) => e.type === "section").map(renderEl)}
         <EdgeLayer
           edges={doc.edges}
           elements={doc.elements}
@@ -904,7 +1001,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
           onSelect={onEdgeSelect}
           onContextMenu={onEdgeMenu}
         />
-        {visible.filter((e) => e.type !== "section").map(renderEl)}
+        {visible.map(renderEl)}
         {guides.map((g, i) => {
           // 参考线始终 1 个屏幕像素粗
           const px = 1 / canvas().viewport.zoom;
@@ -929,14 +1026,29 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         )}
       </div>
 
-      {doc.elements.length === 0 && (
+      {shown.length === 0 && (
         <div className="canvas-empty">
           <p>{t("双击空白处新建卡片")}</p>
           <p>{t("或把文件、图片拖进来")}</p>
         </div>
       )}
 
-      {minimapOpen && <Minimap elements={doc.elements} screen={size} />}
+      {minimapOpen && <Minimap elements={shown} screen={size} />}
+
+      {folderView && (
+        <FolderPanel
+          folderId={folderView.id}
+          focusIds={folderView.focusIds}
+          focusN={folderView.n}
+          dropTarget={dropFolderId}
+          find={find.open && find.query.trim() ? { query: find.query, matches: matchSet, paths: matchPath, current: currentPath } : null}
+          canvasPointAt={canvasPointAt}
+          canvasFolderAt={canvasFolderAt}
+          setCanvasDrop={setDropFolderId}
+          viewCenter={viewCenterWorld}
+          insertFiles={(folders) => void pickFiles(viewCenterWorld(), folders, folderView.id)}
+        />
+      )}
 
       {find.open && (
         <FindBar

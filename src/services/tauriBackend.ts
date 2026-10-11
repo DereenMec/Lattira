@@ -1,7 +1,18 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { Asset, CanvasDay, CanvasMeta, ImportNode, LinkPreview, Project, SearchHit, TrashItem, WorkspaceInfo } from "@/types/model";
+import type {
+  Asset,
+  CanvasDay,
+  CanvasMeta,
+  ImportNode,
+  LinkPreview,
+  NewFileType,
+  Project,
+  SearchHit,
+  TrashItem,
+  WorkspaceInfo,
+} from "@/types/model";
 import { t } from "@/i18n";
 import type { Backend, ClipboardContent } from "./backend";
 import { reportImportProgress, type ImportProgressEvent } from "./importProgress";
@@ -11,11 +22,16 @@ const toWindowsPath = (root: string, rel: string) => `${root}\\${rel.replaceAll(
 /** 调用 src-tauri/src/commands.rs 中的命令。参数名由 Tauri 自动从 camelCase 转为 snake_case。 */
 export function createTauriBackend(): Backend {
   let root = "";
+  /** 本次运行中用默认程序打开过的文件：从别的程序切回来时检查它们有没有被改过 */
+  const opened = new Set<string>();
 
   void listen<ImportProgressEvent>("import-progress", (e) => reportImportProgress(e.payload));
 
   const remember = (ws: WorkspaceInfo | null) => {
-    if (ws) root = ws.path;
+    if (ws) {
+      if (ws.path !== root) opened.clear();
+      root = ws.path;
+    }
     return ws;
   };
 
@@ -53,7 +69,8 @@ export function createTauriBackend(): Backend {
       return out;
     },
     listAssets: () => invoke<Asset[]>("list_assets"),
-    assetUrl: (asset) => convertFileSrc(toWindowsPath(root, asset.path)),
+    // 带上内容指纹：文件被外部程序改过后地址随之变化，WebView 不会继续显示缓存的旧图片
+    assetUrl: (asset) => `${convertFileSrc(toWindowsPath(root, asset.path))}?v=${asset.hash.slice(0, 12)}`,
     assetPath: (asset) => toWindowsPath(root, asset.path),
     revealAsset: (asset) => invoke<void>("reveal_asset", { id: asset.id }),
     revealCanvas: (id) => invoke<void>("reveal_canvas", { id }),
@@ -75,7 +92,17 @@ export function createTauriBackend(): Backend {
     deleteAssets: (ids) => invoke<{ canvasIds: string[]; removedCards: number }>("delete_assets", { ids }),
     copyCards: (payload) => invoke<void>("copy_cards", { payload }),
     readClipboard: () => invoke<ClipboardContent>("read_clipboard"),
-    openAsset: (asset) => invoke<void>("open_asset", { id: asset.id }),
+    openAsset(asset) {
+      opened.add(asset.id);
+      return invoke<void>("open_asset", { id: asset.id });
+    },
+    forkAssetForCanvas: (id, canvasId) => invoke<Asset>("fork_asset_for_canvas", { id, canvasId }),
+    listNewFileTypes: () => invoke<NewFileType[]>("list_new_file_types"),
+    createNewFile: (ext, name) => invoke<Asset>("create_new_file", { ext, name }),
+    checkAssetChanges(ids) {
+      const all = [...new Set([...ids, ...opened])];
+      return all.length ? invoke<Asset[]>("check_asset_changes", { ids: all }) : Promise.resolve([]);
+    },
     subscribeAssetUpdates(onUpdate) {
       let stop: (() => void) | undefined;
       let cancelled = false;

@@ -48,16 +48,10 @@ export function Minimap({ elements, screen }: { elements: CanvasElement[]; scree
       const y = frame.oy + (el.y - frame.y) * frame.scale;
       const w = Math.max(1, el.width * frame.scale);
       const h = Math.max(1, el.height * frame.scale);
-      if (el.type === "section") {
-        ctx.strokeStyle = fill;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x + 0.5, y + 0.5, w, h);
-      } else {
-        ctx.fillStyle = el.type === "image" ? accent : fill;
-        ctx.globalAlpha = el.type === "image" ? 0.55 : 1;
-        ctx.fillRect(x, y, w, h);
-        ctx.globalAlpha = 1;
-      }
+      ctx.fillStyle = el.type === "image" ? accent : fill;
+      ctx.globalAlpha = el.type === "image" ? 0.55 : 1;
+      ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = 1;
     }
   }, [elements, frame, shown]);
 

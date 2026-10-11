@@ -1,4 +1,5 @@
 import { memo, type MouseEvent as ReactMouseEvent } from "react";
+import { canvasAncestor } from "@/lib/folders";
 import { center, rectEdgePoint, type Point } from "@/lib/geometry";
 import type { CanvasElement, Edge, ID } from "@/types/model";
 
@@ -34,9 +35,10 @@ function EdgeLayerImpl({ edges, elements, selectedEdgeId, pending, onSelect, onC
         </marker>
       </defs>
       {edges.map((edge) => {
-        const from = byId.get(edge.fromId);
-        const to = byId.get(edge.toId);
-        if (!from || !to) return null;
+        // 一端在文件夹里时连到画布上包含它的文件夹；两端在同一个文件夹里时不画
+        const from = canvasAncestor(byId, edge.fromId);
+        const to = canvasAncestor(byId, edge.toId);
+        if (!from || !to || from === to) return null;
         const d = segment(from, center(to), to);
         const selected = edge.id === selectedEdgeId;
         return (

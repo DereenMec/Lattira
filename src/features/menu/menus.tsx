@@ -28,17 +28,19 @@ import {
   RefreshCw,
   Save,
   ScanText,
+  Scissors,
   Trash2,
   Ungroup,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { copySelection } from "@/features/canvas/clipboard";
+import { copySelection, cutSelection } from "@/features/canvas/clipboard";
+import { ownAssetForCanvas } from "@/features/canvas/assetEditing";
 import { editLink, fetchPreview, openLink } from "@/features/canvas/links";
 import { exportCanvas, importCanvases } from "@/features/canvas/transfer";
 import { openProjectStyle } from "@/features/project/ProjectStyleDialog";
 import { ProjectIcon } from "@/features/project/projectIcons";
 import { t } from "@/i18n";
-import { boundsOf, contains, sectionAround, withContents } from "@/lib/geometry";
+import { folderChain, folderName, isFolder, withDescendants } from "@/lib/folders";
 import { confirmAction } from "@/services/confirm";
 import { backend } from "@/services/backend";
 import { projectLabel, useAppStore } from "@/store/appStore";
@@ -50,8 +52,8 @@ import {
   type CanvasMeta,
   type CardColor,
   type ID,
+  type FolderElement,
   type Project,
-  type SectionElement,
 } from "@/types/model";
 import type { MenuEntry } from "./ContextMenu";
 import { promptText } from "./PromptDialog";
@@ -89,32 +91,39 @@ async function copyImage(asset: Asset) {
   });
 }
 
-async function renameAsset(asset: Asset) {
+/** 重命名文件；inCanvas 时只改这个画布用的那份（见 ownAssetForCanvas） */
+async function renameAsset(asset: Asset, inCanvas: boolean) {
   const name = await promptText(t("重命名文件"), asset.name);
   if (!name || name === asset.name) return;
   await attempt(t("重命名"), async () => {
-    const renamed = await backend.renameAsset(asset, name);
+    const target = inCanvas ? await ownAssetForCanvas(asset) : asset;
+    const renamed = await backend.renameAsset(target, name);
     app().addAssets([renamed]);
     app().showToast(t("已重命名为「{name}」", { name: renamed.name }));
   });
 }
 
-/** 文件与图片共用的条目：打开、在资源管理器中显示、复制、重命名、另存为 */
-export function assetEntries(asset: Asset): MenuEntry[] {
+/**
+ * 文件与图片共用的条目：打开、在资源管理器中显示、复制、重命名、另存为。
+ * inCanvas 为 true（画布、文件夹窗口、检查器里）时，会拿到文件本身的操作（打开、显示位置、复制路径、重命名）
+ * 用这个画布自己的那份，在这里修改不影响其他画布，见 features/canvas/assetEditing.ts；资源库里操作的是原来那份
+ */
+export function assetEntries(asset: Asset, inCanvas = false): MenuEntry[] {
   const desktop = backend.kind === "tauri";
   const image = asset.mime.startsWith("image/");
+  const own = () => (inCanvas ? ownAssetForCanvas(asset) : Promise.resolve(asset));
   return [
     {
       label: t("打开"),
       icon: <ExternalLink size={S} />,
       hint: t("双击"),
-      onSelect: () => attempt(t("打开文件"), () => backend.openAsset(asset)),
+      onSelect: () => attempt(t("打开文件"), async () => backend.openAsset(await own())),
     },
     {
       label: t("在资源管理器中显示"),
       icon: <FolderOpen size={S} />,
       disabled: !desktop,
-      onSelect: () => attempt(t("打开资源管理器"), () => backend.revealAsset(asset)),
+      onSelect: () => attempt(t("打开资源管理器"), async () => backend.revealAsset(await own())),
     },
     ...(image
       ? ([
@@ -128,9 +137,9 @@ export function assetEntries(asset: Asset): MenuEntry[] {
       label: t("复制文件路径"),
       icon: <Link size={S} />,
       disabled: !desktop,
-      onSelect: () => void copyText(backend.assetPath(asset), t("文件路径")),
+      onSelect: () => void attempt(t("复制"), async () => copyText(backend.assetPath(await own()), t("文件路径"))),
     },
-    { label: t("重命名…"), icon: <FilePen size={S} />, onSelect: () => void renameAsset(asset) },
+    { label: t("重命名…"), icon: <FilePen size={S} />, onSelect: () => void renameAsset(asset, inCanvas) },
     {
       label: t("另存为…"),
       icon: <Save size={S} />,
@@ -164,23 +173,22 @@ function colorEntry(onPick: (c: CardColor) => void, current?: CardColor): MenuEn
 }
 
 /** 文件夹的显示名：嵌套时带上外层文件夹，如「资料 / 图纸」 */
-function folderPath(elements: CanvasElement[], sec: SectionElement): string {
-  const name = (s: SectionElement) => s.label.trim() || t("未命名文件夹");
-  const outer = elements
-    .filter((e): e is SectionElement => e.type === "section" && e.id !== sec.id && contains(e, sec))
-    .sort((a, b) => b.width * b.height - a.width * a.height);
-  return [...outer, sec].map(name).join(" / ");
+export function folderPath(byId: ReadonlyMap<ID, CanvasElement>, id: ID): string {
+  return folderChain(byId, id)
+    .map((f) => folderName(f, t("未命名文件夹")))
+    .join(" / ");
 }
 
-/** 「移到文件夹」：列出画布上的其他文件夹（不含选中的、以及选中内容当前所在的那个） */
+/** 「移到文件夹」：列出画布上的全部文件夹（不含移动的文件夹及其里面的、以及它们当前所在的那个） */
 function moveToFolderEntry(ids: ID[]): MenuEntry {
   const doc = cv().doc!;
-  const moving = withContents(doc.elements, ids);
-  const box = boundsOf(doc.elements.filter((e) => moving.has(e.id)));
-  const current = box ? sectionAround(doc.elements, box, moving) : undefined;
+  const byId = new Map(doc.elements.map((e) => [e.id, e]));
+  const moving = withDescendants(doc.elements, ids);
+  const parents = new Set(ids.map((id) => byId.get(id)?.parentId));
+  const current = parents.size === 1 ? [...parents][0] : undefined;
   const targets = doc.elements
-    .filter((e): e is SectionElement => e.type === "section" && !moving.has(e.id) && e.id !== current?.id)
-    .map((sec) => ({ sec, path: folderPath(doc.elements, sec) }))
+    .filter((e): e is FolderElement => isFolder(e) && !moving.has(e.id) && e.id !== current)
+    .map((f) => ({ f, path: folderPath(byId, f.id) }))
     .sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
   return {
     label: t("移到文件夹"),
@@ -188,16 +196,21 @@ function moveToFolderEntry(ids: ID[]): MenuEntry {
     disabled: targets.length === 0,
     hint: targets.length === 0 ? t("没有其他文件夹") : undefined,
     children: targets.length
-      ? targets.map(({ sec, path }) => ({
+      ? targets.map(({ f, path }) => ({
           label: path,
           icon: <Folder size={S} />,
           onSelect: () => {
-            cv().moveIntoSection(ids, sec.id);
-            cv().requestFocus(sec.id, { select: false });
+            if (!cv().moveIntoFolder(ids, f.id)) return;
+            app().showToast(t("已移到「{name}」", { name: folderName(f, t("未命名文件夹")) }));
           },
         }))
       : undefined,
   };
+}
+
+export async function renameFolder(f: FolderElement) {
+  const label = await promptText(t("重命名文件夹"), f.label);
+  if (label !== null && label !== f.label) cv().updateElements({ [f.id]: { label } });
 }
 
 const alignOptions = (): { mode: AlignMode; label: string; icon: ReactNode }[] => [
@@ -216,6 +229,7 @@ function removeElements(ids: ID[]) {
 
 const arrangeEntries = (ids: ID[]): MenuEntry[] => [
   { label: t("复制"), icon: <ClipboardCopy size={S} />, hint: "Ctrl+C", onSelect: () => void copySelection() },
+  { label: t("剪切"), icon: <Scissors size={S} />, hint: "Ctrl+X", onSelect: () => void cutSelection() },
   { label: t("创建副本"), icon: <CopyPlus size={S} />, hint: "Ctrl+D", onSelect: () => cv().duplicate(ids) },
   { label: t("置于顶层"), icon: <ArrowUpToLine size={S} />, onSelect: () => cv().reorder(ids, "front") },
   { label: t("置于底层"), icon: <ArrowDownToLine size={S} />, onSelect: () => cv().reorder(ids, "back") },
@@ -259,28 +273,34 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
         { label: t("删除"), icon: <Trash2 size={S} />, hint: "Delete", danger: true, onSelect: () => removeElements(ids) },
       ];
     }
-    if (el.type === "section") {
-      const inside = doc.elements.filter(
-        (o) => o.id !== el.id && o.x >= el.x && o.y >= el.y && o.x + o.width <= el.x + el.width && o.y + o.height <= el.y + el.height,
-      );
+    if (el.type === "folder") {
+      const inside = withDescendants(doc.elements, [el.id]).size - 1;
       return [
-        { label: t("重命名"), icon: <Pencil size={S} />, hint: t("双击标题"), onSelect: () => cv().setEditing(el.id) },
+        { label: t("打开"), icon: <FolderOpen size={S} />, hint: t("双击"), onSelect: () => cv().openFolder(el.id) },
+        { label: t("重命名"), icon: <Pencil size={S} />, hint: "F2", onSelect: () => cv().setEditing(el.id) },
         colorEntry(setColor([el]), el.color),
         "separator",
         moveToFolderEntry(ids),
-        { label: t("解散文件夹（保留卡片）"), icon: <Ungroup size={S} />, onSelect: () => cv().ungroup(el.id) },
+        {
+          label: t("解散文件夹（内容放回画布）"),
+          icon: <Ungroup size={S} />,
+          disabled: inside === 0,
+          onSelect: () => cv().dissolveFolder(el.id),
+        },
+        ...arrangeEntries(ids),
         "separator",
         {
-          label: t("删除文件夹和其中的 {n} 张卡片", { n: inside.length }),
+          label: inside ? t("删除文件夹和其中的 {n} 项", { n: inside }) : t("删除文件夹"),
           icon: <Trash2 size={S} />,
+          hint: "Delete",
           danger: true,
-          onSelect: () => removeElements([el.id, ...inside.map((o) => o.id)]),
+          onSelect: () => removeElements(ids),
         },
       ];
     }
     const asset = app().assets.get(el.assetId);
     return [
-      ...(asset ? assetEntries(asset) : []),
+      ...(asset ? assetEntries(asset, true) : []),
       "separator",
       moveToFolderEntry(ids),
       ...arrangeEntries(ids),
@@ -289,7 +309,7 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
     ];
   }
 
-  const colorable = els.filter((e) => e.type === "text" || e.type === "link" || e.type === "section");
+  const colorable = els.filter((e) => e.type === "text" || e.type === "link" || e.type === "folder");
   const align = alignOptions();
   return [
     { label: t("放进文件夹"), icon: <FolderPlus size={S} />, hint: "Ctrl+G", onSelect: () => cv().groupSelection() },
@@ -324,6 +344,49 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
       onSelect: () => removeElements(ids),
     },
   ];
+}
+
+/** 文件夹窗口里选中的内容的右键菜单；open 打开（进入子文件夹、打开文件等），moveOut 拿到画布上 */
+export function folderItemMenu(ids: ID[], actions: { open(id: ID): void; moveOut(): void }): MenuEntry[] {
+  const doc = cv().doc;
+  if (!doc) return [];
+  const els = doc.elements.filter((e) => ids.includes(e.id));
+  const common: MenuEntry[] = [
+    { label: t("移到画布"), icon: <ArrowUpToLine size={S} />, onSelect: actions.moveOut },
+    moveToFolderEntry(ids),
+    { label: t("复制"), icon: <ClipboardCopy size={S} />, hint: "Ctrl+C", onSelect: () => void copySelection(ids) },
+    { label: t("剪切"), icon: <Scissors size={S} />, hint: "Ctrl+X", onSelect: () => void cutSelection(ids) },
+  ];
+  const remove: MenuEntry = {
+    label: els.length > 1 ? t("删除 {n} 项", { n: els.length }) : t("删除"),
+    icon: <Trash2 size={S} />,
+    hint: "Delete",
+    danger: true,
+    onSelect: () => cv().deleteElements(ids),
+  };
+  if (els.length !== 1) return [...common, "separator", remove];
+  const el = els[0];
+  let own: MenuEntry[] = [];
+  if (el.type === "folder") {
+    own = [
+      { label: t("打开"), icon: <FolderOpen size={S} />, hint: t("双击"), onSelect: () => actions.open(el.id) },
+      { label: t("重命名…"), icon: <Pencil size={S} />, hint: "F2", onSelect: () => void renameFolder(el) },
+    ];
+  } else if (el.type === "text") {
+    own = [
+      { label: t("编辑"), icon: <Pencil size={S} />, hint: t("双击"), onSelect: () => cv().openEditor(el.id) },
+      { label: t("复制文字"), icon: <Copy size={S} />, onSelect: () => void copyText(el.text, t("文字")) },
+    ];
+  } else if (el.type === "link") {
+    own = [
+      { label: t("在浏览器中打开"), icon: <ExternalLink size={S} />, hint: t("双击"), onSelect: () => void openLink(el.url) },
+      { label: t("复制网址"), icon: <Copy size={S} />, onSelect: () => void copyText(el.url, t("网址")) },
+    ];
+  } else {
+    const asset = app().assets.get(el.assetId);
+    own = asset ? assetEntries(asset, true) : [];
+  }
+  return [...own, ...(own.length ? (["separator"] as MenuEntry[]) : []), ...common, "separator", remove];
 }
 
 /** 画布卡片（项目页、最近页、日历）的右键菜单 */

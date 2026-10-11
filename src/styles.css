@@ -45,6 +45,9 @@
   --card-blue: #e2eef8;
   --card-purple: #eee6f7;
 
+  --folder: #e9b949;
+  --folder-back: #d29b2c;
+
   --radius: 10px;
   --font: "Maple Mono NF CN", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
   --mono: "Maple Mono NF CN", "Cascadia Code", Consolas, monospace;
@@ -87,6 +90,9 @@
     --card-blue: #1e2d3a;
     --card-purple: #2d2438;
 
+    --folder: #c9993a;
+    --folder-back: #9c7426;
+
     color-scheme: dark;
   }
 }
@@ -118,6 +124,9 @@
   --card-green: #1f3328;
   --card-blue: #1e2d3a;
   --card-purple: #2d2438;
+
+  --folder: #c9993a;
+  --folder-back: #9c7426;
 
   color-scheme: dark;
 }
@@ -740,55 +749,300 @@ kbd {
   object-fit: contain;
 }
 
-.el-section {
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-  border: 1.5px dashed var(--line-strong);
-  box-shadow: none;
-  pointer-events: none;
-}
-.el-section.color-red,
-.el-section.color-orange,
-.el-section.color-yellow,
-.el-section.color-green,
-.el-section.color-blue,
-.el-section.color-purple {
-  opacity: 0.9;
-}
-.el-section .handle-resize {
-  pointer-events: auto;
-}
-.el-section.is-drop-target {
-  border: 2px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-.el-section.is-drop-target .el-section-label {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.el-section-label {
+/* 文件夹卡片：左上角带一个小耳朵，像文件夹 */
+.el-folder::before {
+  content: "";
   position: absolute;
-  left: 10px;
-  top: -14px;
-  max-width: calc(100% - 20px);
-  padding: 3px 10px;
-  border-radius: 6px;
-  background: var(--surface);
+  left: 14px;
+  top: -7px;
+  width: 64px;
+  height: 8px;
   border: 1px solid var(--line-strong);
-  font-weight: 600;
-  font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: auto;
-  cursor: grab;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: inherit;
+}
+.el-folder.is-drop-target {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--card-default));
+}
+.el-folder-body {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  cursor: default;
+}
+.el-folder-body .file-meta {
+  flex: 1;
+}
+.folder-glyph {
+  flex: none;
+  display: block;
+}
+.folder-glyph .folder-back {
+  fill: var(--folder-back);
+}
+.folder-glyph .folder-front {
+  fill: var(--folder);
 }
 .el-label-editor {
   border: none;
   outline: none;
   background: transparent;
   font-weight: 600;
-  width: 180px;
+  width: 100%;
+  padding: 0;
   user-select: text;
+}
+
+/* ---- 文件夹窗口 ---- */
+/* 默认位置在查找栏（顶部居中）下方，两者不重叠 */
+.folder-panel {
+  position: absolute;
+  top: 60px;
+  right: 16px;
+  z-index: 20;
+  width: min(580px, calc(100% - 32px));
+  height: min(460px, calc(100% - 140px));
+  min-width: 300px;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  resize: both;
+  outline: none;
+}
+.folder-panel.is-drop-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-lg);
+}
+.fp-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: grab;
+}
+.fp-crumbs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.fp-crumb-wrap {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.fp-crumb-wrap:last-child {
+  flex-shrink: 0;
+  max-width: 100%;
+}
+.fp-crumb-sep {
+  flex: none;
+  color: var(--ink-3);
+}
+.fp-crumb {
+  min-width: 0;
+  max-width: 180px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.fp-crumb:hover {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+.fp-crumb.is-current {
+  max-width: 260px;
+  color: var(--ink);
+  font-weight: 600;
+  cursor: default;
+}
+.fp-crumb.is-current:hover {
+  background: none;
+}
+.fp-crumb.is-drop-target {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.fp-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  grid-auto-rows: max-content;
+  gap: 6px;
+  align-content: start;
+}
+.fp-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 6px 6px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  min-width: 0;
+  cursor: default;
+}
+.fp-item:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.fp-item.is-selected {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--select) 45%, transparent);
+}
+.fp-item.is-drop-target {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+/* 画布内查找命中：本身命中，或是里面有命中的子文件夹 */
+.fp-item.is-match {
+  background: color-mix(in srgb, var(--card-yellow) 70%, transparent);
+  border-color: var(--warn);
+}
+.fp-item.is-current-match {
+  box-shadow: 0 0 0 2px var(--warn);
+}
+.fp-item.is-current-match mark.hit {
+  background: var(--hit-current);
+}
+.fp-item.is-dragging {
+  opacity: 0.45;
+}
+.fp-item.is-highlighted {
+  animation: flash 1.6s ease-out;
+}
+.fp-thumb {
+  width: 84px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+.fp-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 6px;
+  object-fit: cover;
+  pointer-events: none;
+}
+.fp-thumb-image img {
+  box-shadow: 0 0 0 1px var(--line);
+}
+.fp-thumb .fp-file-icon {
+  width: 44px;
+  height: 52px;
+  object-fit: contain;
+  border-radius: 0;
+}
+.fp-thumb .fp-link-icon {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+}
+.fp-text {
+  width: 72px;
+  height: 60px;
+  overflow: hidden;
+  padding: 5px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--card-default);
+  font-size: 9px;
+  line-height: 1.35;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.fp-name {
+  width: 100%;
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: center;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.fp-sub {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.fp-empty {
+  grid-column: 1 / -1;
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 36px 16px;
+  color: var(--ink-2);
+  text-align: center;
+}
+.fp-empty .folder-glyph {
+  opacity: 0.5;
+  margin-bottom: 8px;
+}
+.fp-empty p {
+  margin: 0;
+}
+.fp-footer {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 28px 7px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.fp-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 从文件夹窗口拖出内容时跟着指针的标签 */
+.fp-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1000;
+  max-width: 240px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
 }
 
 .handle-resize {
@@ -1292,6 +1546,10 @@ kbd {
   fill: color-mix(in srgb, var(--accent) 6%, transparent);
   stroke-dasharray: 6 4;
 }
+.thumb-item.thumb-d {
+  fill: color-mix(in srgb, var(--folder) 22%, var(--card-default));
+  stroke: var(--folder-back);
+}
 .thumb-item.color-red {
   fill: var(--card-red);
 }
@@ -1379,6 +1637,14 @@ body.is-dragging-canvas * {
 .el.is-lod {
   box-shadow: none;
 }
+/* 缩得很小时文件夹只显示名称，字放大 */
+.el-folder.is-lod .file-name {
+  font-size: 30px;
+  line-height: 1.2;
+}
+.el-folder.is-lod .file-sub {
+  display: none;
+}
 .el-text-lod {
   padding: 14px 16px;
   font-size: 34px;
@@ -1449,7 +1715,8 @@ body.is-dragging-canvas * {
   background: var(--surface);
   border: 1px solid var(--line);
   box-shadow: var(--shadow-lg);
-  z-index: 5;
+  /* 在文件夹窗口之上：窗口被拖到顶部时查找栏仍然可用 */
+  z-index: 25;
 }
 .find-bar input {
   width: 260px;

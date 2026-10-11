@@ -286,6 +286,46 @@ export function createBrowserBackend(): Backend {
     async readClipboard() {
       return { cards: copied?.cards ?? null, files: [], text: null };
     },
+    // 浏览器预览里的文件只存在内存中，不会被外部程序修改
+    async checkAssetChanges() {
+      return [];
+    },
+    async forkAssetForCanvas(id, canvasId) {
+      const asset = state.assets.find((a) => a.id === id);
+      if (!asset) throw new Error(t("找不到这个文件"));
+      const shared = Object.entries(state.assetRefs).some(([c, ids]) => c !== canvasId && ids.includes(id));
+      if (!shared) return { ...asset };
+      const copyId = uuidv7();
+      const copy: Asset = { ...asset, id: copyId, hash: `${asset.hash.split(":")[0]}:${copyId}`, importedAt: Date.now(), refCount: 0 };
+      state.assets.push(copy);
+      const url = blobUrls.get(id);
+      if (url) blobUrls.set(copyId, url);
+      persist();
+      return { ...copy };
+    },
+    // 浏览器读不到系统的「新建」菜单，只提供文本文档
+    async listNewFileTypes() {
+      return [{ ext: ".txt", name: t("文本文档") }];
+    },
+    async createNewFile(ext, name) {
+      const fileName = name.toLowerCase().endsWith(ext) ? name : `${name}${ext}`;
+      const id = uuidv7();
+      const asset: Asset = {
+        id,
+        // 新建的文件各自独立，不和内容相同的文件合并
+        hash: `${await sha256(new ArrayBuffer(0))}:${id}`,
+        path: `assets/${toLocalDate(new Date()).slice(0, 7)}/${fileName}`,
+        name: fileName,
+        mime: "text/plain",
+        size: 0,
+        importedAt: Date.now(),
+        refCount: 0,
+      };
+      state.assets.push(asset);
+      blobUrls.set(id, URL.createObjectURL(new Blob([], { type: asset.mime })));
+      persist();
+      return { ...asset };
+    },
     subscribeAssetUpdates() {
       return () => {};
     },
@@ -326,9 +366,11 @@ export function createBrowserBackend(): Backend {
         const doc = JSON.parse(await f.text()) as { nodes?: Record<string, unknown>[]; edges?: unknown[] };
         // 引用的文件不在本工作区时，变成写着原路径的文本卡片
         for (const n of doc.nodes ?? []) {
-          const lattira = n.lattira as { assetId?: ID } | undefined;
+          const lattira = n.lattira as { assetId?: ID; parent?: ID } | undefined;
           if (n.type === "file" && !state.assets.some((a) => a.id === lattira?.assetId)) {
-            Object.assign(n, { type: "text", text: t("找不到文件：{file}", { file: String(n.file ?? "") }), lattira: undefined });
+            // 放在文件夹里的仍留在文件夹里
+            const kept = lattira?.parent ? { type: "text", parent: lattira.parent } : undefined;
+            Object.assign(n, { type: "text", text: t("找不到文件：{file}", { file: String(n.file ?? "") }), lattira: kept });
           }
         }
         const now = Date.now();

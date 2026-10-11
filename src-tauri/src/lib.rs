@@ -6,6 +6,7 @@ mod error;
 mod files;
 mod link;
 mod ocr;
+mod shellnew;
 mod transfer;
 mod trash;
 mod workspace;
@@ -42,6 +43,10 @@ pub fn run() {
             commands::import_bytes,
             commands::list_assets,
             commands::open_asset,
+            commands::check_asset_changes,
+            commands::fork_asset_for_canvas,
+            commands::list_new_file_types,
+            commands::create_new_file,
             commands::reveal_asset,
             commands::reveal_canvas,
             commands::reveal_project,

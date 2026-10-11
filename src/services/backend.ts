@@ -8,6 +8,7 @@ import type {
   ImportNode,
   LinkPreview,
   LocalDate,
+  NewFileType,
   Project,
   SearchHit,
   TrashItem,
@@ -74,6 +75,20 @@ export interface Backend {
   assetUrl(asset: Asset): string;
   /** 用系统默认程序打开文件 */
   openAsset(asset: Asset): Promise<void>;
+  /**
+   * 检查这些资源（以及本次运行中打开过的）的文件是否被外部程序改过，重新登记大小、指纹、图片尺寸；
+   * 返回有变化的资源。没改过的文件只读属性，不读内容
+   */
+  checkAssetChanges(ids: ID[]): Promise<Asset[]>;
+  /**
+   * 各画布独立：画布 canvasId 要打开或重命名文件前调用。文件还被其他画布用着时复制一份只给这个画布用并返回副本，
+   * 否则原样返回
+   */
+  forkAssetForCanvas(id: ID, canvasId: ID): Promise<Asset>;
+  /** 系统右键菜单「新建」里能新建的文件类型（与资源管理器一致） */
+  listNewFileTypes(): Promise<NewFileType[]>;
+  /** 按系统「新建」的方式新建一个文件放进工作区；新建的文件不和内容相同的文件合并 */
+  createNewFile(ext: string, name: string): Promise<Asset>;
   /** 资源在磁盘上的绝对路径；浏览器预览模式下为空串 */
   assetPath(asset: Asset): string;
   /** 在资源管理器中显示并选中 */

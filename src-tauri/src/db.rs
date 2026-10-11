@@ -101,6 +101,10 @@ CREATE TABLE trashed_assets (
     trash_file    TEXT NOT NULL,            -- 回收站中的文件，相对工作区根目录
     deleted_at    INTEGER NOT NULL
 );
+"#, r#"
+-- 文件最后一次登记时的修改时间（毫秒）；用来发现文件被外部程序改过，见 commands::check_asset_changes。
+-- 为 NULL 时（升级前导入的）首次检查只记下当前时间
+ALTER TABLE assets ADD COLUMN modified_at INTEGER;
 "#];
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {

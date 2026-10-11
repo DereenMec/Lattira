@@ -79,15 +79,20 @@ export function newLinkCard(at: Point, url: string): LinkElement {
  * 把网址作为链接卡片放到画布上，并在后台获取预览。
  * 多个时排成每行 4 张的网格，行距按带预览图的高度留，卡片拿到图片加高后不会互相盖住。
  */
-export function placeLinks(urls: string[], at: Point) {
+export function placeLinks(urls: string[], at: Point, parentId?: ID): LinkElement[] {
   const gap = 24;
   const cols = Math.min(urls.length, 4);
   const left = at.x - ((cols - 1) * (LINK_WIDTH + gap)) / 2;
-  const cards = urls.map((url, i) =>
-    newLinkCard({ x: left + (i % cols) * (LINK_WIDTH + gap), y: at.y + Math.floor(i / cols) * (LINK_HEIGHT + LINK_IMAGE_HEIGHT + gap) }, url),
-  );
-  useCanvasStore.getState().addElements(cards);
+  const cards = urls.map((url, i) => {
+    const card = newLinkCard(
+      { x: left + (i % cols) * (LINK_WIDTH + gap), y: at.y + Math.floor(i / cols) * (LINK_HEIGHT + LINK_IMAGE_HEIGHT + gap) },
+      url,
+    );
+    return parentId ? { ...card, parentId } : card;
+  });
+  useCanvasStore.getState().addElements(cards, { select: !parentId });
   if (useSettings.getState().linkPreviews) for (const card of cards) void fetchPreview(card);
+  return cards;
 }
 
 /**
@@ -129,12 +134,16 @@ export function parseTypedUrl(input: string): string | null {
 }
 
 /** 弹框输入网址，在 at 处放一张链接卡片 */
-export async function promptLink(at: Point) {
+export async function promptLink(at: Point, parentId?: ID) {
   const input = await promptText(t("添加链接：输入网址"));
   if (input === null) return;
   const url = parseTypedUrl(input);
-  if (url) placeLinks([url], at);
-  else useAppStore.getState().showToast(t("不是有效的网址：{url}", { url: input }));
+  if (!url) {
+    useAppStore.getState().showToast(t("不是有效的网址：{url}", { url: input }));
+    return;
+  }
+  const cards = placeLinks([url], at, parentId);
+  if (parentId) useCanvasStore.getState().showInOpenFolder(parentId, cards.map((c) => c.id));
 }
 
 /** 弹框修改链接卡片的网址 */

@@ -6,6 +6,7 @@ import { fileExtension, formatBytes } from "@/lib/format";
 import { backend } from "@/services/backend";
 import type { Asset, CanvasElement, ID, LinkElement } from "@/types/model";
 import { Highlight } from "@/features/search/Highlight";
+import { FolderGlyph } from "./FolderGlyph";
 import { hostOf, useLinkFetching } from "./links";
 
 export interface ElementHandlers {
@@ -28,6 +29,8 @@ interface Props {
   matched: boolean;
   /** 文件夹：拖动的卡片松手后会放进它 */
   dropTarget?: boolean;
+  /** 文件夹里直接包含的元素数 */
+  itemCount?: number;
   /** 命中画布内查找时的查询词，用来高亮卡片上的文字；没命中时为空，查询变化不会让其他卡片重新渲染 */
   findQuery?: string;
   /** 查找中当前跳到的那一个 */
@@ -47,6 +50,7 @@ function ElementViewImpl({
   highlighted,
   matched,
   dropTarget,
+  itemCount = 0,
   findQuery,
   currentMatch,
   lod,
@@ -55,7 +59,6 @@ function ElementViewImpl({
   handlers,
 }: Props) {
   const t = useT();
-  const isSection = el.type === "section";
   const className = [
     "el",
     `el-${el.type}`,
@@ -76,9 +79,9 @@ function ElementViewImpl({
       className={className}
       style={{ transform: `translate(${el.x}px, ${el.y}px)`, width: el.width, height: el.height }}
       data-element-id={el.id}
-      onPointerDown={isSection ? undefined : (e) => handlers.onPointerDown(e, el.id)}
-      onDoubleClick={isSection ? undefined : () => handlers.onDoubleClick(el.id)}
-      onContextMenu={isSection ? undefined : (e) => handlers.onContextMenu(e, el.id)}
+      onPointerDown={(e) => handlers.onPointerDown(e, el.id)}
+      onDoubleClick={() => handlers.onDoubleClick(el.id)}
+      onContextMenu={(e) => handlers.onContextMenu(e, el.id)}
     >
       {el.type === "text" &&
         (editing ? (
@@ -119,29 +122,31 @@ function ElementViewImpl({
 
       {el.type === "link" && <LinkBody el={el} lod={lod} query={findQuery} />}
 
-      {el.type === "section" && (
-        <div
-          className="el-section-label"
-          onPointerDown={(e) => handlers.onPointerDown(e, el.id)}
-          onDoubleClick={() => handlers.onDoubleClick(el.id)}
-          onContextMenu={(e) => handlers.onContextMenu(e, el.id)}
-        >
-          {editing ? (
-            <TextEditor initial={el.label} onDone={(v) => handlers.onFinishEdit(el.id, v)} />
-          ) : el.label ? (
-            <Highlight text={el.label} query={findQuery} />
-          ) : (
-            t("未命名文件夹")
-          )}
+      {el.type === "folder" && (
+        <div className="el-folder-body">
+          <FolderGlyph size={40} />
+          <div className="file-meta">
+            <div className="file-name" title={el.label}>
+              {editing ? (
+                <TextEditor initial={el.label} onDone={(v) => handlers.onFinishEdit(el.id, v)} />
+              ) : el.label ? (
+                <Highlight text={el.label} query={findQuery} />
+              ) : (
+                t("未命名文件夹")
+              )}
+            </div>
+            <div className="file-sub">{itemCount ? t("{n} 项", { n: itemCount }) : t("空文件夹")}</div>
+          </div>
         </div>
       )}
 
       {showHandles && !editing && (
         <>
-          <div className="handle-resize" onPointerDown={(e) => handlers.onResizeStart(e, el.id)} title={t("拖动调整大小")} />
-          {!isSection && (
-            <div className="handle-connect" onPointerDown={(e) => handlers.onConnectStart(e, el.id)} title={t("拖到另一张卡片上连线")} />
+          {/* 文件夹卡片大小固定 */}
+          {el.type !== "folder" && (
+            <div className="handle-resize" onPointerDown={(e) => handlers.onResizeStart(e, el.id)} title={t("拖动调整大小")} />
           )}
+          <div className="handle-connect" onPointerDown={(e) => handlers.onConnectStart(e, el.id)} title={t("拖到另一张卡片上连线")} />
         </>
       )}
     </div>

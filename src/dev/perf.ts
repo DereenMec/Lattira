@@ -54,12 +54,12 @@ export async function generate(n: number): Promise<ID> {
     const first = elements[start];
     elements.unshift({
       id: uuidv7(),
-      type: "section",
-      label: `分组 ${start / 50 + 1}`,
-      x: first.x - 16,
-      y: first.y - 40,
-      width: 312,
-      height: 190,
+      type: "folder",
+      label: `文件夹 ${start / 50 + 1}`,
+      x: -340,
+      y: first.y,
+      width: 260,
+      height: 76,
       createdAt: now,
       updatedAt: now,
     });

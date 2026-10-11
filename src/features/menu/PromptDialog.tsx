@@ -1,16 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import { useT } from "@/i18n";
 
+interface PromptOptions {
+  /** 只选中扩展名之前的部分（输入文件名时），与资源管理器重命名一致 */
+  selectStem?: boolean;
+}
+
 interface PromptState {
-  prompt: { title: string; initial: string; resolve(v: string | null): void } | null;
+  prompt: { title: string; initial: string; opts: PromptOptions; resolve(v: string | null): void } | null;
 }
 
 const usePrompt = create<PromptState>(() => ({ prompt: null }));
 
 /** 弹出单行输入框（用于重命名等）；取消时返回 null */
-export function promptText(title: string, initial = ""): Promise<string | null> {
-  return new Promise((resolve) => usePrompt.setState({ prompt: { title, initial, resolve } }));
+export function promptText(title: string, initial = "", opts: PromptOptions = {}): Promise<string | null> {
+  return new Promise((resolve) => usePrompt.setState({ prompt: { title, initial, opts, resolve } }));
 }
 
 export function PromptHost() {
@@ -18,12 +23,24 @@ export function PromptHost() {
   const t = useT();
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  // 打开后、输入框里已经是初始文字时选中一次
+  const needSelect = useRef(false);
 
   useEffect(() => {
     if (!prompt) return;
     setValue(prompt.initial);
-    requestAnimationFrame(() => inputRef.current?.select());
+    needSelect.current = true;
   }, [prompt]);
+
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (!prompt || !input || !needSelect.current || value !== prompt.initial) return;
+    needSelect.current = false;
+    input.focus();
+    const dot = value.lastIndexOf(".");
+    if (prompt.opts.selectStem && dot > 0) input.setSelectionRange(0, dot);
+    else input.select();
+  }, [prompt, value]);
 
   if (!prompt) return null;
   const finish = (v: string | null) => {

@@ -33,8 +33,10 @@ export function TextEditorDialog() {
 
   const close = () => {
     const s = useCanvasStore.getState();
-    if (value !== initial.current) s.updateElements({ [editorId]: { text: value } });
     s.closeEditor();
+    // 文件夹里新建的卡片没写内容就关掉：不留空白卡片（画布上的卡片在原地编辑时也是这样）
+    if (el.parentId && !value.trim() && !initial.current.trim()) s.deleteElements([editorId]);
+    else if (value !== initial.current) s.updateElements({ [editorId]: { text: value } });
   };
 
   const lines = value.split("\n").length;

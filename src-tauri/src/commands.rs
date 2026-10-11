@@ -18,6 +18,7 @@ use crate::clipboard;
 use crate::error::{Error, Result};
 use crate::files;
 use crate::ocr;
+use crate::shellnew;
 use crate::workspace::{self, new_id, now_ms, AppState, Workspace, WorkspaceInfo};
 
 // ---------------------------------------------------------------------------
@@ -518,20 +519,47 @@ pub(crate) fn asset_destination(ws: &Workspace, name: &str) -> Result<std::path:
 }
 
 fn register_asset(ws: &Workspace, hash: &str, dest: &Path, name: &str) -> Result<Asset> {
+    insert_asset(ws, hash, dest, name, false)
+}
+
+/// 登记一个资源。independent 为 true 时（新建的文件）指纹后加上 id，导入内容相同的文件时不会和它合并成一份：
+/// 新建的空白文档各自独立，在一个画布上编辑不会改到另一个。文件被编辑、重新登记后换成真正的指纹
+fn insert_asset(ws: &Workspace, hash: &str, dest: &Path, name: &str, independent: bool) -> Result<Asset> {
     let mime = mime_guess::from_path(name).first_or_octet_stream().essence_str().to_string();
     let size = fs::metadata(dest)?.len() as i64;
-    let (width, height) = if mime.starts_with("image/") {
-        imagesize::size(dest).map(|s| (Some(s.width as i64), Some(s.height as i64))).unwrap_or((None, None))
-    } else {
-        (None, None)
-    };
+    let (width, height) = image_size(dest, &mime);
     let id = new_id();
+    let hash = if independent { format!("{hash}:{id}") } else { hash.to_string() };
+    let modified = fs::metadata(dest).ok().as_ref().and_then(modified_ms);
     ws.conn.execute(
-        "INSERT INTO assets (id, hash, path, name, mime, size, width, height, imported_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![id, hash, ws.rel(dest), name, mime, size, width, height, now_ms()],
+        "INSERT INTO assets (id, hash, path, name, mime, size, width, height, imported_at, modified_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![id, hash, ws.rel(dest), name, mime, size, width, height, now_ms(), modified],
     )?;
     get_asset(&ws.conn, "id", &id)?.ok_or_else(|| Error::NotFound("资源", id))
+}
+
+/// 导入时可以直接复用的、内容相同的已有资源。
+/// 登记的指纹可能已经过时（文件刚被外部程序改过、还没来得及检查），先确认文件没变；变了就重新登记，不再复用
+fn reusable(ws: &Workspace, hash: &str) -> Result<Option<Asset>> {
+    let Some(existing) = get_asset(&ws.conn, "hash", hash)? else { return Ok(None) };
+    let changed = changed_files(ws, std::slice::from_ref(&existing.id))?;
+    let Some(file) = changed.first() else { return Ok(Some(existing)) };
+    record_change(ws, file, &hash_file(&file.path)?)?;
+    get_asset(&ws.conn, "hash", hash)
+}
+
+/// 文件的修改时间（毫秒）
+fn modified_ms(meta: &fs::Metadata) -> Option<i64> {
+    let t = meta.modified().ok()?;
+    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as i64)
+}
+
+fn image_size(path: &Path, mime: &str) -> (Option<i64>, Option<i64>) {
+    if !mime.starts_with("image/") {
+        return (None, None);
+    }
+    imagesize::size(path).map(|s| (Some(s.width as i64), Some(s.height as i64))).unwrap_or((None, None))
 }
 
 /// 复制一个外部文件进工作区；内容相同的文件只存一份
@@ -540,7 +568,7 @@ pub(crate) fn import_file(ws: &Workspace, src: &Path) -> Result<Asset> {
         return Err(Error::Invalid(format!("暂不支持导入文件夹：{}", src.display())));
     }
     let hash = hash_file(src)?;
-    if let Some(existing) = get_asset(&ws.conn, "hash", &hash)? {
+    if let Some(existing) = reusable(ws, &hash)? {
         return Ok(existing);
     }
     let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "文件".into());
@@ -724,7 +752,7 @@ fn import_file_unlocked(state: &AppState, root: &Path, src: &Path, size: u64, pr
     let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "文件".into());
     progress.start_file(&name);
     let hash = hash_file_with(src, |n| progress.add(n))?;
-    if let Some(existing) = with_root(state, root, |ws| get_asset(&ws.conn, "hash", &hash))? {
+    if let Some(existing) = with_root(state, root, |ws| reusable(ws, &hash))? {
         progress.finish_file(size);
         return Ok(existing);
     }
@@ -740,7 +768,7 @@ fn import_file_unlocked(state: &AppState, root: &Path, src: &Path, size: u64, pr
     }
     let asset = with_root(state, root, |ws| {
         // 复制期间另一次导入可能已经登记了相同内容
-        if let Some(existing) = get_asset(&ws.conn, "hash", &hash)? {
+        if let Some(existing) = reusable(ws, &hash)? {
             let _ = fs::remove_file(&dest);
             return Ok(existing);
         }
@@ -810,7 +838,7 @@ pub async fn import_paths(
 pub async fn import_bytes(app: AppHandle, state: State<'_, AppState>, name: String, bytes: Vec<u8>) -> Result<Asset> {
     let (asset, root) = state.with(|ws| {
         let hash = hex(&Sha256::digest(&bytes));
-        if let Some(existing) = get_asset(&ws.conn, "hash", &hash)? {
+        if let Some(existing) = reusable(ws, &hash)? {
             return Ok((existing, ws.root.clone()));
         }
         let dest = asset_destination(ws, &name)?;
@@ -839,6 +867,173 @@ pub async fn open_asset(app: AppHandle, state: State<'_, AppState>, id: String) 
     app.opener()
         .open_path(path.to_string_lossy(), None::<&str>)
         .map_err(|e| Error::Invalid(format!("无法打开文件：{e}")))
+}
+
+/// 一个资源在磁盘上的文件需要重新登记（被外部程序改过）时的信息
+struct ChangedFile {
+    id: String,
+    path: PathBuf,
+    mime: String,
+}
+
+/// 第一步（持锁，只读文件属性）：大小或修改时间和登记的不一样的资源。
+/// 升级前导入、没有记录修改时间的：大小没变就只补记修改时间，大小变了才算改过
+fn changed_files(ws: &Workspace, ids: &[String]) -> Result<Vec<ChangedFile>> {
+    let mut out = Vec::new();
+    for id in ids {
+        let row = ws
+            .conn
+            .query_row("SELECT path, mime, size, modified_at FROM assets WHERE id = ?1", [id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?))
+            })
+            .optional()?;
+        let Some((rel, mime, size, recorded)) = row else { continue };
+        let path = ws.abs(&rel);
+        // 文件不见了（被删除或移走）不在这里处理
+        let Ok(meta) = fs::metadata(&path) else { continue };
+        let now = modified_ms(&meta);
+        let same_size = meta.len() as i64 == size;
+        match recorded {
+            Some(m) if Some(m) == now && same_size => {}
+            None if same_size => {
+                ws.conn.execute("UPDATE assets SET modified_at = ?2 WHERE id = ?1", params![id, now])?;
+            }
+            _ => out.push(ChangedFile { id: id.clone(), path, mime }),
+        }
+    }
+    Ok(out)
+}
+
+/// 第三步（持锁）：写入重新计算的指纹、大小、图片尺寸；图片的识别结果清空，等后台重新识别。
+/// 改完后内容恰好和另一个资源相同时，指纹后面加上自己的 id，以免和那个资源冲突（之后导入相同内容的文件会用那个资源）
+fn record_change(ws: &Workspace, file: &ChangedFile, hash: &str) -> Result<()> {
+    let meta = fs::metadata(&file.path)?;
+    let (width, height) = image_size(&file.path, &file.mime);
+    let taken: Option<String> =
+        ws.conn.query_row("SELECT id FROM assets WHERE hash = ?1 AND id <> ?2", params![hash, file.id], |r| r.get(0)).optional()?;
+    let hash = if taken.is_some() { format!("{hash}:{}", file.id) } else { hash.to_string() };
+    ws.conn.execute(
+        "UPDATE assets SET hash = ?2, size = ?3, width = ?4, height = ?5, modified_at = ?6,
+           ocr_text = CASE WHEN mime LIKE 'image/%' THEN NULL ELSE ocr_text END
+         WHERE id = ?1",
+        params![file.id, hash, meta.len() as i64, width, height, modified_ms(&meta)],
+    )?;
+    Ok(())
+}
+
+/// 检查这些资源的文件是否被外部程序改过（例如双击打开、用记事本编辑后保存）。
+/// 更新登记的大小、指纹和图片尺寸，返回有变化的资源。
+/// 计算指纹时不持有工作区锁，大文件不会挡住其他操作
+#[tauri::command]
+pub async fn check_asset_changes(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Result<Vec<Asset>> {
+    let (root, files) = state.with(|ws| Ok((ws.root.clone(), changed_files(ws, &ids)?)))?;
+    let mut changed = Vec::new();
+    for file in &files {
+        let hash = match hash_file(&file.path) {
+            Ok(h) => h,
+            Err(e) => {
+                // 文件正被其他程序写入等：下次再检查
+                eprintln!("[check_asset_changes] 跳过 {}：{e}", file.path.display());
+                continue;
+            }
+        };
+        with_root(&state, &root, |ws| record_change(ws, file, &hash))?;
+        changed.push(file.id.clone());
+    }
+    if changed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if files.iter().any(|f| f.mime.starts_with("image/")) {
+        ocr::schedule(app, root.clone());
+    }
+    with_root(&state, &root, |ws| {
+        changed.iter().map(|id| get_asset(&ws.conn, "id", id)).filter_map(Result::transpose).collect()
+    })
+}
+
+/// 各画布独立：画布 canvas_id 要打开（编辑）或重命名文件 id 时调用。
+/// 文件还被其他画布用着时，给这个画布复制一份（内容相同，图中文字沿用）并返回副本，之后在这个画布上的修改不会影响其他画布；
+/// 只有这个画布在用时原样返回。复制大文件时不持有工作区锁
+fn fork_for_canvas(state: &AppState, id: &str, canvas_id: &str) -> Result<Asset> {
+    let (root, asset, reserved) = state.with(|ws| {
+        let asset = get_asset(&ws.conn, "id", id)?.ok_or_else(|| Error::NotFound("资源", id.into()))?;
+        // 回收站里的画布也算：恢复之后它看到的应该还是原来的文件
+        let others: i64 = ws.conn.query_row(
+            "SELECT COUNT(*) FROM asset_refs WHERE asset_id = ?1 AND canvas_id <> ?2",
+            params![id, canvas_id],
+            |r| r.get(0),
+        )?;
+        if others == 0 {
+            return Ok((ws.root.clone(), asset, None));
+        }
+        // 先建好空文件占住文件名，同时进行的导入不会分到同一个名字
+        let dest = asset_destination(ws, &asset.name)?;
+        fs::File::create(&dest)?;
+        let src = ws.abs(&asset.path);
+        Ok((ws.root.clone(), asset, Some((src, dest))))
+    })?;
+    let Some((src, dest)) = reserved else { return Ok(asset) };
+    let forked = fs::copy(&src, &dest).map_err(Error::from).and_then(|_| {
+        let hash = hash_file(&dest)?;
+        with_root(state, &root, |ws| {
+            // 副本只属于这个画布：导入内容相同的文件时仍然用原来那份
+            let copy = insert_asset(ws, &hash, &dest, &asset.name, true)?;
+            ws.conn.execute(
+                "UPDATE assets SET ocr_text = (SELECT ocr_text FROM assets WHERE id = ?2) WHERE id = ?1",
+                params![copy.id, asset.id],
+            )?;
+            get_asset(&ws.conn, "id", &copy.id)?.ok_or_else(|| Error::NotFound("资源", copy.id.clone()))
+        })
+    });
+    if forked.is_err() {
+        let _ = fs::remove_file(&dest);
+    }
+    forked
+}
+
+#[tauri::command]
+pub async fn fork_asset_for_canvas(state: State<'_, AppState>, id: String, canvas_id: String) -> Result<Asset> {
+    fork_for_canvas(&state, &id, &canvas_id)
+}
+
+/// Windows 右键菜单「新建」里能新建的文件类型，见 shellnew.rs
+#[tauri::command]
+pub async fn list_new_file_types() -> Result<Vec<shellnew::NewFileType>> {
+    Ok(shellnew::list())
+}
+
+/// 文件名补上扩展名，去掉不能用在文件名里的字符（没写名字时为「未命名」）
+fn new_file_name(name: &str, ext: &str) -> String {
+    let name = name.trim();
+    let stem = if name.to_lowercase().ends_with(ext) { &name[..name.len() - ext.len()] } else { name };
+    format!("{}{ext}", files::sanitize(stem))
+}
+
+/// 按系统「新建」菜单的方式新建一个文件（空文件、注册表里的内容或模板文件），放进工作区并登记
+#[tauri::command]
+pub async fn create_new_file(app: AppHandle, state: State<'_, AppState>, ext: String, name: String) -> Result<Asset> {
+    let ext = ext.to_lowercase();
+    let (kind, template) = shellnew::template(&ext).ok_or_else(|| Error::Invalid(format!("系统里没有新建 {ext} 文件的方式")))?;
+    let name = new_file_name(&name, &kind.ext);
+    let (asset, root) = state.with(|ws| {
+        let dest = asset_destination(ws, &name)?;
+        match &template {
+            shellnew::Template::Empty => files::write_atomic(&dest, b"")?,
+            shellnew::Template::Bytes(bytes) => files::write_atomic(&dest, bytes)?,
+            shellnew::Template::File(src) => {
+                fs::copy(src, &dest)?;
+            }
+        }
+        let asset = insert_asset(ws, &hash_file(&dest)?, &dest, &name, true);
+        if asset.is_err() {
+            let _ = fs::remove_file(&dest);
+        }
+        Ok((asset?, ws.root.clone()))
+    })?;
+    if asset.mime.starts_with("image/") {
+        ocr::schedule(app, root);
+    }
+    Ok(asset)
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,6 +1422,126 @@ pub async fn search(state: State<'_, AppState>, query: String) -> Result<Vec<Sea
 mod tests {
     use super::*;
 
+
+    /// 各画布独立：被其他画布用着的文件给当前画布复制一份，只有当前画布在用时不复制
+    #[test]
+    fn fork_copies_only_shared_files() {
+        let dir = std::env::temp_dir().join(format!("lattira-fork-{}", new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (ws, _) = Workspace::open(&dir).unwrap();
+        let src = dir.join("说明.txt");
+        fs::write(&src, "原文").unwrap();
+        let asset = import_file(&ws, &src).unwrap();
+        for canvas in ["A", "B"] {
+            ws.conn.execute("INSERT INTO asset_refs (canvas_id, asset_id) VALUES (?1, ?2)", params![canvas, asset.id]).unwrap();
+        }
+        let state = AppState::default();
+        *state.ws.lock().unwrap() = Some(ws);
+
+        // B 也在用：给 A 复制一份，内容相同、文件不同，导入相同内容时仍用原来那份
+        let copy = fork_for_canvas(&state, &asset.id, "A").unwrap();
+        assert_ne!(copy.id, asset.id);
+        assert_eq!(copy.name, asset.name);
+        state
+            .with(|ws| {
+                assert_ne!(ws.abs(&copy.path), ws.abs(&asset.path));
+                assert_eq!(fs::read_to_string(ws.abs(&copy.path)).unwrap(), "原文");
+                assert_eq!(import_file(ws, &src).unwrap().id, asset.id);
+                // A 改用副本（保存画布时会这样更新引用）
+                ws.conn.execute("DELETE FROM asset_refs WHERE canvas_id = 'A'", []).unwrap();
+                ws.conn.execute("INSERT INTO asset_refs (canvas_id, asset_id) VALUES ('A', ?1)", [&copy.id]).unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        // 副本只有 A 在用、原件只有 B 在用：都不再复制
+        assert_eq!(fork_for_canvas(&state, &copy.id, "A").unwrap().id, copy.id);
+        assert_eq!(fork_for_canvas(&state, &asset.id, "B").unwrap().id, asset.id);
+
+        drop(state);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn new_file_names_get_extension_and_are_cleaned() {
+        assert_eq!(new_file_name("新建 Microsoft Word 文档", ".docx"), "新建 Microsoft Word 文档.docx");
+        assert_eq!(new_file_name("报告.DOCX", ".docx"), "报告.docx");
+        assert_eq!(new_file_name("a/b", ".txt"), "a_b.txt");
+        assert_eq!(new_file_name("  ", ".txt"), "未命名.txt");
+    }
+
+    /// 新建的空白文件各自独立：两个空文件、以及之后导入的空文件，都不会合并成同一份
+    #[test]
+    fn created_files_are_independent() {
+        let dir = std::env::temp_dir().join(format!("lattira-new-{}", new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (ws, _) = Workspace::open(&dir).unwrap();
+        let create = |name: &str| {
+            let dest = asset_destination(&ws, name).unwrap();
+            files::write_atomic(&dest, b"").unwrap();
+            insert_asset(&ws, &hash_file(&dest).unwrap(), &dest, name, true).unwrap()
+        };
+        let a = create("新建 文本文档.txt");
+        let b = create("新建 文本文档.txt");
+        assert_ne!(a.id, b.id);
+        assert_ne!(a.path, b.path);
+        let empty = dir.join("空.txt");
+        fs::write(&empty, "").unwrap();
+        let imported = import_file(&ws, &empty).unwrap();
+        assert!(imported.id != a.id && imported.id != b.id);
+        drop(ws);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 被外部程序改过的文件：重新登记大小和指纹，之后导入原来的内容不会误用改过的文件
+    #[test]
+    fn edited_asset_is_detected_and_rehashed() {
+        let dir = std::env::temp_dir().join(format!("lattira-edit-{}", new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (ws, _) = Workspace::open(&dir).unwrap();
+        let src = dir.join("说明.txt");
+        fs::write(&src, "第一版").unwrap();
+        let asset = import_file(&ws, &src).unwrap();
+        let other_src = dir.join("另一个.txt");
+        fs::write(&other_src, "另一个文件的内容").unwrap();
+        let other = import_file(&ws, &other_src).unwrap();
+        let ids = vec![asset.id.clone()];
+
+        // 没改过：不需要重新登记
+        assert!(changed_files(&ws, &ids).unwrap().is_empty());
+
+        // 在工作区里编辑这个文件（相当于双击打开、用记事本改完保存）
+        let stored = ws.abs(&asset.path);
+        fs::write(&stored, "第二版，内容更长了").unwrap();
+        let changed = changed_files(&ws, &ids).unwrap();
+        assert_eq!(changed.len(), 1);
+        record_change(&ws, &changed[0], &hash_file(&stored).unwrap()).unwrap();
+        let updated = get_asset(&ws.conn, "id", &asset.id).unwrap().unwrap();
+        assert_eq!(updated.size, "第二版，内容更长了".len() as i64);
+        assert_ne!(updated.hash, asset.hash);
+        assert!(changed_files(&ws, &ids).unwrap().is_empty());
+
+        // 再导入原来那一版：不能当成已有的（改过的）文件，而是另存一份
+        let again = import_file(&ws, &src).unwrap();
+        assert_ne!(again.id, asset.id);
+        assert_eq!(fs::read_to_string(ws.abs(&again.path)).unwrap(), "第一版");
+
+        // 改成和另一个资源完全相同的内容：指纹不冲突，导入相同内容时用的仍是那个资源
+        fs::write(&stored, "另一个文件的内容").unwrap();
+        let changed = changed_files(&ws, &ids).unwrap();
+        record_change(&ws, &changed[0], &hash_file(&stored).unwrap()).unwrap();
+        assert_eq!(import_file(&ws, &other_src).unwrap().id, other.id);
+
+        // 升级前导入、没有记录修改时间的：大小没变时只补记时间
+        ws.conn.execute("UPDATE assets SET modified_at = NULL WHERE id = ?1", [&asset.id]).unwrap();
+        assert!(changed_files(&ws, &ids).unwrap().is_empty());
+        let recorded: Option<i64> =
+            ws.conn.query_row("SELECT modified_at FROM assets WHERE id = ?1", [&asset.id], |r| r.get(0)).unwrap();
+        assert!(recorded.is_some());
+
+        drop(ws);
+        fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn snippet_centers_on_match() {
         let text = "第一行\n这里有很长的一段前文用来测试截取，然后出现关键字连线，后面还有一些文字";

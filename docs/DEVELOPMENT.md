@@ -64,6 +64,7 @@ src-tauri/src/
 ├─ desktop.rs              托盘、关闭时最小化到托盘、呼出主界面的全局快捷键
 ├─ transfer.rs             画布导出为画布包（.zip）与导入（画布包或 .canvas）
 ├─ ocr.rs                  图片文字识别（后台线程，结果用于搜索）
+├─ shellnew.rs             读取 Windows 右键菜单「新建」的文件类型与模板（注册表 ShellNew）
 ├─ workspace.rs            工作区的打开与初始化、应用设置
 ├─ db.rs                   SQLite 表结构与迁移
 └─ files.rs                文件名清理、去重命名、原子写入

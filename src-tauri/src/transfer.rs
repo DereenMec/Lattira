@@ -211,12 +211,14 @@ fn import_canvas_file(ws: &Workspace, project_id: &str, path: &Path, scope: Opti
         let file = node.get("file").and_then(Value::as_str).unwrap_or_default().to_string();
         let created = node.pointer("/lattira/createdAt").and_then(Value::as_i64).unwrap_or(now);
         let updated = node.pointer("/lattira/updatedAt").and_then(Value::as_i64).unwrap_or(now);
-        match locate(&file, base, scope) {
+        // 所在的文件夹（栖页画布里放在文件夹中的卡片）
+        let parent = node.pointer("/lattira/parent").cloned();
+        let mut lattira = match locate(&file, base, scope) {
             Some(src) => {
                 let asset = commands::import_file(ws, &src)?;
                 let kind = if asset.mime.starts_with("image/") { "image" } else { "file" };
                 node["file"] = json!(asset.path);
-                node["lattira"] = json!({ "type": kind, "assetId": asset.id, "createdAt": created, "updatedAt": updated });
+                json!({ "type": kind, "assetId": asset.id, "createdAt": created, "updatedAt": updated })
             }
             None => {
                 // 找不到的文件变成文本卡片，写明原来的路径
@@ -224,9 +226,13 @@ fn import_canvas_file(ws: &Workspace, project_id: &str, path: &Path, scope: Opti
                 obj.remove("file");
                 obj.insert("type".into(), json!("text"));
                 obj.insert("text".into(), json!(format!("找不到文件：{file}")));
-                obj.insert("lattira".into(), json!({ "type": "text", "createdAt": created, "updatedAt": updated }));
+                json!({ "type": "text", "createdAt": created, "updatedAt": updated })
             }
+        };
+        if let Some(parent) = parent {
+            lattira["parent"] = parent;
         }
+        node["lattira"] = lattira;
     }
     let element_count = nodes.len() as i64;
 
@@ -353,8 +359,8 @@ mod tests {
         fs::write(
             dir.join("vault/画布/想法.canvas"),
             r#"{"nodes":[
-                {"id":"a","type":"file","file":"附件/图.png","x":0,"y":0,"width":100,"height":100},
-                {"id":"b","type":"file","file":"附件/不存在.pdf","x":0,"y":0,"width":100,"height":100},
+                {"id":"a","type":"file","file":"附件/图.png","x":0,"y":0,"width":100,"height":100,"lattira":{"type":"image","parent":"f"}},
+                {"id":"b","type":"file","file":"附件/不存在.pdf","x":0,"y":0,"width":100,"height":100,"lattira":{"type":"file","parent":"f"}},
                 {"type":"text","text":"没有 id 和坐标"}
             ]}"#,
         )
@@ -370,6 +376,9 @@ mod tests {
                 .unwrap();
         assert_eq!(saved["nodes"][0]["lattira"]["type"], json!("image"));
         assert!(ws.abs(saved["nodes"][0]["file"].as_str().unwrap()).is_file());
+        // 放在文件夹里的卡片导入后仍在文件夹里
+        assert_eq!(saved["nodes"][0]["lattira"]["parent"], json!("f"));
+        assert_eq!(saved["nodes"][1]["lattira"]["parent"], json!("f"));
         assert_eq!(saved["nodes"][1]["type"], json!("text"));
         assert!(saved["nodes"][1]["text"].as_str().unwrap().contains("附件/不存在.pdf"));
         assert!(saved["nodes"][2]["id"].is_string());

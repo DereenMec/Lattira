@@ -1,4 +1,4 @@
-import { ArrowUpRight, ExternalLink, LocateFixed, RefreshCw } from "lucide-react";
+import { ArrowUpRight, ExternalLink, FolderOpen, LocateFixed, RefreshCw } from "lucide-react";
 import { useMemo } from "react";
 import { openContextMenu } from "@/features/menu/ContextMenu";
 import { assetEntries } from "@/features/menu/menus";
@@ -9,11 +9,12 @@ import { formatBytes, isImageMime, isOcrMime } from "@/lib/format";
 import { backend } from "@/services/backend";
 import { projectLabel, useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
+import { openFromCanvas } from "./assetEditing";
 import { fetchPreview, openLink, useLinkFetching } from "./links";
 import { useSettings } from "@/store/settingsStore";
 import { CARD_COLORS, type Asset, type CanvasMeta, type CardColor, type ID } from "@/types/model";
 
-const TYPE_LABEL = { text: msg("文本卡片"), image: msg("图片"), file: msg("文件"), link: msg("链接"), section: msg("文件夹") } as const;
+const TYPE_LABEL = { text: msg("文本卡片"), image: msg("图片"), file: msg("文件"), link: msg("链接"), folder: msg("文件夹") } as const;
 
 /**
  * 当前画布引用的全部文件与图片；单击定位到卡片，双击打开，右键更多操作。
@@ -54,12 +55,12 @@ function CanvasFileList() {
               <button
                 title={`${asset.name}\n${t("单击定位 · 双击打开 · 右键更多")}`}
                 onClick={() => useCanvasStore.getState().requestFocus(elementIds[0], { select: false })}
-                onDoubleClick={() => void backend.openAsset(asset)}
+                onDoubleClick={() => void openFromCanvas(asset)}
                 onContextMenu={(e) =>
                   openContextMenu(e, [
                     { label: t("在画布中定位"), icon: <LocateFixed size={15} />, onSelect: () => useCanvasStore.getState().requestFocus(elementIds[0]) },
                     "separator",
-                    ...assetEntries(asset),
+                    ...assetEntries(asset, true),
                   ])
                 }
               >
@@ -92,7 +93,7 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
   if (!doc) return <aside className="inspector" style={{ width }} />;
   const { updateCanvas, navigate, showToast } = useAppStore.getState();
   const selected = doc.elements.filter((e) => selectedIds.includes(e.id));
-  const colorable = selected.filter((e) => e.type === "text" || e.type === "link" || e.type === "section");
+  const colorable = selected.filter((e) => e.type === "text" || e.type === "link" || e.type === "folder");
 
   const setColor = (color: CardColor) =>
     useCanvasStore.getState().updateElements(Object.fromEntries(colorable.map((e) => [e.id, { color }])));
@@ -161,6 +162,22 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
             <dt>{t("修改于")}</dt>
             <dd>{formatRelative(selected[0].updatedAt)}</dd>
           </dl>
+          {selected[0].type === "folder" &&
+            (() => {
+              const folder = selected[0];
+              const inside = doc.elements.filter((e) => e.parentId === folder.id);
+              return (
+                <>
+                  <dl className="props">
+                    <dt>{t("内容")}</dt>
+                    <dd>{inside.length ? t("{n} 项", { n: inside.length }) : t("空文件夹")}</dd>
+                  </dl>
+                  <button className="btn" onClick={() => useCanvasStore.getState().openFolder(folder.id)}>
+                    <FolderOpen size={14} /> {t("打开文件夹")}
+                  </button>
+                </>
+              );
+            })()}
           {selected[0].type === "link" &&
             (() => {
               const link = selected[0];
@@ -220,7 +237,7 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
                     <dt>{t("引用")}</dt>
                     <dd>{t("{n} 个画布", { n: asset.refCount })}</dd>
                   </dl>
-                  <button className="btn" onClick={() => void backend.openAsset(asset)}>
+                  <button className="btn" onClick={() => void openFromCanvas(asset)}>
                     <ExternalLink size={14} /> {t("用默认程序打开")}
                   </button>
                   {selected[0].type === "image" && isOcrMime(asset.mime) && asset.ocrText !== undefined && (

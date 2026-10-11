@@ -1,7 +1,9 @@
 import { useEffect } from "react";
 import { AssetLibrary } from "@/features/assets/AssetLibrary";
 import { CalendarView } from "@/features/calendar/CalendarView";
+import { watchAssetChanges } from "@/features/canvas/assetChanges";
 import { CanvasPage } from "@/features/canvas/CanvasPage";
+import { loadNewFileTypes } from "@/features/canvas/newFiles";
 import { CanvasDragGhost } from "@/features/layout/canvasDrag";
 import { ErrorBoundary } from "@/features/layout/ErrorBoundary";
 import { ImportProgressHost } from "@/features/layout/ImportProgress";
@@ -126,6 +128,12 @@ export function App() {
   useEffect(() => {
     void useAppStore.getState().init();
   }, []);
+
+  // 文件被外部程序改过（多个画布共用同一个文件）时刷新大小和图片
+  useEffect(() => watchAssetChanges(), []);
+
+  // 右键「新建」菜单里的文件类型来自系统注册表，先读好，第一次打开菜单时就有
+  useEffect(() => void loadNewFileTypes(), []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
