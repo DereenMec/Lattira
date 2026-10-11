@@ -1,20 +1,31 @@
 //! 文件名与磁盘写入相关的小工具
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 
+pub fn sync_file(path: &Path) -> std::io::Result<()> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()
+}
+
 const RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1",
-    "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
 /// 把任意标题变成 Windows 上合法的文件名（不含扩展名）
 pub fn sanitize(name: &str) -> String {
     let mut s: String = name
         .chars()
-        .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     s = s.trim().trim_end_matches(['.', ' ']).to_string();
     if s.chars().count() > 80 {
@@ -33,8 +44,16 @@ pub fn sanitize(name: &str) -> String {
 /// `allow` 为当前文件自身的路径（重命名时它不算冲突）
 pub fn unique_path(dir: &Path, stem: &str, ext: &str, allow: Option<&Path>) -> PathBuf {
     let make = |n: usize| {
-        let base = if n == 1 { stem.to_string() } else { format!("{stem} ({n})") };
-        dir.join(if ext.is_empty() { base } else { format!("{base}.{ext}") })
+        let base = if n == 1 {
+            stem.to_string()
+        } else {
+            format!("{stem} ({n})")
+        };
+        dir.join(if ext.is_empty() {
+            base
+        } else {
+            format!("{base}.{ext}")
+        })
     };
     let mut n = 1;
     loop {
@@ -56,15 +75,28 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    crate::journal::before(path)?;
+    let tmp = path.with_extension(format!("{}.tmp", crate::workspace::new_id()));
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// 相对路径（/ 分隔）转绝对路径
 pub fn resolve(root: &Path, rel: &str) -> PathBuf {
-    rel.split('/').fold(root.to_path_buf(), |p, part| p.join(part))
+    rel.split('/')
+        .fold(root.to_path_buf(), |p, part| p.join(part))
 }
 
 /// 绝对路径转相对路径（/ 分隔）

@@ -1,3 +1,4 @@
+import { operationTarget } from "@/lib/operations";
 /**
  * 卡片的复制（Ctrl+C）与粘贴（Ctrl+V）。
  *
@@ -62,6 +63,7 @@ const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.trim() ?? 
  * cut 为 true 时是剪切：复制成功后把它们从画布（或文件夹）中删除，可以撤销。
  */
 export async function copySelection(selected?: ID[], opts: { cut?: boolean } = {}): Promise<void> {
+  const operation = operationTarget();
   const { doc, selectedIds } = canvas();
   const chosen = selected ?? selectedIds;
   const cards = packCards(chosen);
@@ -87,7 +89,7 @@ export async function copySelection(selected?: ID[], opts: { cut?: boolean } = {
   }
   if (opts.cut) {
     // 复制期间画布可能已经切换，只删除仍在当前画布上的
-    if (canvas().doc?.canvasId === doc.canvasId) canvas().deleteElements(chosen);
+    if (operation.valid()) canvas().deleteElements(chosen);
     app().showToast(t("已剪切 {n} 张卡片", { n: chosen.length }));
   } else {
     app().showToast(t("已复制 {n} 张卡片", { n: chosen.length }));
@@ -113,6 +115,7 @@ function parseCards(raw: string | null): CopiedCards | null {
  * 其他位置要求改名（见 cardNames.ts）。返回最外层的那些新卡片
  */
 async function pasteCards(data: CopiedCards, at: Point, parentId?: ID): Promise<ID[]> {
+  const operation = operationTarget(parentId);
   const doc = canvas().doc;
   const inPlace = !!data.source && data.source.canvasId === doc?.canvasId && (data.source.parentId ?? undefined) === parentId;
   const { assets } = app();
@@ -121,7 +124,7 @@ async function pasteCards(data: CopiedCards, at: Point, parentId?: ID): Promise<
   if (missing.length > 0 && backend.kind === "tauri") {
     const paths = missing.map((a) => a.absPath);
     const imported = await runImport((task) => backend.importPaths(paths, task), { key: pathsKey(paths) });
-    if (!imported) return [];
+    if (!imported || !operation.valid()) return [];
     app().addAssets(imported);
     missing.forEach((a, i) => remap.set(a.id, imported[i].id));
   }
@@ -157,6 +160,7 @@ async function pasteCards(data: CopiedCards, at: Point, parentId?: ID): Promise<
   const edges = data.edges
     .map((e) => ({ ...e, id: uuidv7(), fromId: ids.get(e.fromId)!, toId: ids.get(e.toId)! }))
     .filter((e) => kept.has(e.fromId) && kept.has(e.toId));
+  if (!operation.valid()) return [];
   canvas().insertCards(elements, edges);
   return elements.filter((el) => (el.parentId ?? undefined) === parentId).map((el) => el.id);
 }
@@ -184,15 +188,18 @@ export async function duplicateCards(chosen: ID[]): Promise<void> {
  * parentId 不为空时粘贴到那个文件夹里（at 只用于保存位置）。返回粘贴出来的最外层元素
  */
 export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text: string }, parentId?: ID): Promise<ID[]> {
+  const operation = operationTarget(parentId);
   // 导入、粘贴进来的文件和文件夹与这一层已有的重名时要求改名
   const add = async (incoming: CanvasElement[]) => {
     const elements = await resolveIncoming(incoming, parentId, "ask");
+    if (!operation.valid()) return [];
     canvas().addElements(elements, { select: !parentId });
     return elements.filter((el) => el.parentId === parentId).map((el) => el.id);
   };
   const into = (elements: CanvasElement[]) => (parentId ? elements.map((el) => ({ ...el, parentId })) : elements);
   try {
     const clip = await backend.readClipboard().catch(() => null);
+    if (!operation.valid()) return [];
     const cards = parseCards(clip?.cards ?? null);
     if (cards) return await pasteCards(cards, at, parentId);
 
@@ -203,7 +210,7 @@ export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text
         key: pathsKey(files),
         done: (n) => importedMessage(assetsInTree(n).length),
       });
-      if (!nodes) return [];
+      if (!nodes || !operation.valid()) return [];
       app().addAssets(assetsInTree(nodes));
       return await add(elementsForTree(nodes, at, parentId));
     }
@@ -211,6 +218,7 @@ export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text
     if (fallback.files.length) {
       imported = (await runImport((task) => backend.importBlobs(fallback.files, task), { done: (a) => importedMessage(a.length) })) ?? [];
     }
+    if (!operation.valid()) return [];
     if (imported.length) {
       app().addAssets(imported);
       return await add(into(elementsForAssets(imported, at)));

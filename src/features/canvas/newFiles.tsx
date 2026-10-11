@@ -1,3 +1,4 @@
+import { operationTarget } from "@/lib/operations";
 /**
  * 右键菜单里的「新建」：画布上的卡片（文本卡片、文件夹、链接），以及与 Windows 右键菜单「新建」一致的文件类型。
  * Windows 的「文件夹」「快捷方式」在栖页里对应文件夹卡片和链接卡片，不再单独列出。
@@ -39,6 +40,7 @@ export function loadNewFileTypes(): Promise<void> {
  * 不和这一层已有的文件、文件夹重名：默认名「新建 文本文档.txt」已有时用「新建 文本文档 (2).txt」，与资源管理器一致
  */
 async function createFile(type: NewFileType, at: Point, parentId?: ID) {
+  const operation = operationTarget(parentId);
   const label = t("新建 {type}", { type: type.name });
   const taken = namesAt(parentId);
   const name = await promptText(label, uniqueName(`${label}${type.ext}`, taken, { ext: true }), {
@@ -46,9 +48,10 @@ async function createFile(type: NewFileType, at: Point, parentId?: ID) {
     // 与后台一致：没以这个扩展名结尾时补上
     validate: (v) => nameError(v.toLowerCase().endsWith(type.ext) ? v : `${v}${type.ext}`, taken),
   });
-  if (name === null) return;
+  if (name === null || !operation.valid()) return;
   try {
     const asset = await backend.createNewFile(type.ext, name);
+    if (!operation.valid()) return;
     useAppStore.getState().addAssets([asset]);
     const [card] = elementsForAssets([asset], at);
     const placed = { ...card, x: card.x - card.width / 2, y: card.y - card.height / 2, ...(parentId ? { parentId } : {}) };

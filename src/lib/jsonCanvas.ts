@@ -35,6 +35,10 @@ interface JsonCanvasNode {
 }
 
 interface JsonCanvasEdge {
+  fromEnd?: "none" | "arrow";
+  color?: string;
+  fromSide?: Edge["fromSide"];
+  toSide?: Edge["toSide"];
   id: string;
   fromNode: string;
   toNode: string;
@@ -63,14 +67,20 @@ const PRESET_TO_COLOR = Object.fromEntries(
 
 export function toJsonCanvas(doc: CanvasDoc, assets: ReadonlyMap<ID, Asset>): string {
   const nodes: JsonCanvasNode[] = doc.elements.map((el) => {
+    const original = el.source ?? {};
+    const extension = { ...(original.lattira as Record<string, unknown> | undefined) };
+    delete extension.parent;
+    if (el.type !== "image" && el.type !== "file") delete extension.assetId;
     const base = {
+      ...original,
       id: el.id,
-      x: Math.round(el.x),
-      y: Math.round(el.y),
-      width: Math.round(el.width),
-      height: Math.round(el.height),
-      color: el.color && el.color !== "default" ? COLOR_TO_PRESET[el.color] : undefined,
+      x: el.x,
+      y: el.y,
+      width: el.width,
+      height: el.height,
+      color: el.color ? (el.color === "default" ? undefined : COLOR_TO_PRESET[el.color]) : el.sourceColor,
       lattira: {
+        ...extension,
         type: el.type,
         ...(el.parentId ? { parent: el.parentId } : {}),
         createdAt: el.createdAt,
@@ -79,12 +89,13 @@ export function toJsonCanvas(doc: CanvasDoc, assets: ReadonlyMap<ID, Asset>): st
     };
     switch (el.type) {
       case "text":
+        if (original.type === "file" && el.text === original.file) return { ...base, type: "file", file: el.text };
         return { ...base, type: "text", text: el.text };
       case "folder":
         return { ...base, type: "group", label: el.label };
       case "link": {
         const { title, description, siteName, image, icon } = el;
-        return { ...base, type: "link", url: el.url, lattira: { ...base.lattira!, link: { title, description, siteName, image, icon } } };
+        return { ...base, type: "link", url: el.url, lattira: { ...base.lattira!, link: { ...(extension.link as object), title, description, siteName, image, icon } } };
       }
       case "image":
       case "file":
@@ -97,13 +108,18 @@ export function toJsonCanvas(doc: CanvasDoc, assets: ReadonlyMap<ID, Asset>): st
     }
   });
   const edges: JsonCanvasEdge[] = doc.edges.map((e) => ({
+    ...e.source,
     id: e.id,
     fromNode: e.fromId,
     toNode: e.toId,
-    toEnd: "arrow",
+    fromEnd: e.fromEnd,
+    toEnd: e.toEnd ?? "arrow",
+    fromSide: e.fromSide,
+    toSide: e.toSide,
+    color: e.color,
     label: e.label,
   }));
-  const file: JsonCanvasFile = { nodes, edges, lattira: { version: 1, viewport: doc.viewport } };
+  const file: JsonCanvasFile = { ...doc.source, nodes, edges, lattira: { ...(doc.source?.lattira as object), version: 1, viewport: doc.viewport } };
   return JSON.stringify(file, null, 2);
 }
 
@@ -137,7 +153,9 @@ function convertGroups(elements: CanvasElement[], groupIds: ReadonlySet<ID>) {
   for (const el of elements) {
     if (el.parentId) continue;
     let best: CanvasElement | undefined;
-    for (const g of groups) if (g.id !== el.id && contains(g, el) && (!best || area(g) < area(best))) best = g;
+    for (const g of groups) {
+      if (g.id !== el.id && contains(g, el) && (!groupIds.has(el.id) || area(g) > area(el) || (area(g) === area(el) && g.id < el.id)) && (!best || area(g) < area(best))) best = g;
+    }
     if (best) {
       el.parentId = best.id;
       moved.add(el.id);
@@ -163,11 +181,29 @@ export function fromJsonCanvas(json: string, canvasId: ID): CanvasDoc {
   const empty: CanvasDoc = { canvasId, elements: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } };
   if (!json.trim()) return empty;
   const file = JSON.parse(json) as Partial<JsonCanvasFile>;
+  if (!file || typeof file !== "object" || !Array.isArray(file.nodes) || (file.edges !== undefined && !Array.isArray(file.edges))) throw new Error("无效的 JSON Canvas 文件");
+  if (file.lattira !== undefined && (!file.lattira || typeof file.lattira !== "object" || Array.isArray(file.lattira))) throw new Error("画布扩展字段无效");
   const now = Date.now();
   const elements: CanvasElement[] = [];
   const legacyGroups = new Set<ID>();
+  const nodeIds = new Set<string>();
   for (const n of file.nodes ?? []) {
+    if (!n || typeof n.id !== "string" || !n.id || nodeIds.has(n.id) || !["text", "file", "link", "group"].includes(n.type)) throw new Error("画布节点类型或 ID 无效");
+    nodeIds.add(n.id);
+    if (![n.x, n.y, n.width, n.height].every((v) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= 1e9) || n.width <= 0 || n.height <= 0) throw new Error("画布节点尺寸无效");
+    for (const key of ["text", "file", "url", "label", "color"] as const) if (n[key] !== undefined && typeof n[key] !== "string") throw new Error("画布节点内容无效");
+    if (n.lattira !== undefined) {
+      if (!n.lattira || typeof n.lattira !== "object" || Array.isArray(n.lattira)) throw new Error("画布扩展字段无效");
+      for (const key of ["type", "assetId", "parent"] as const) if (n.lattira[key] !== undefined && typeof n.lattira[key] !== "string") throw new Error("画布扩展字段无效");
+      for (const key of ["createdAt", "updatedAt"] as const) if (n.lattira[key] !== undefined && !Number.isFinite(n.lattira[key])) throw new Error("画布时间无效");
+      if (n.lattira.link !== undefined) {
+        if (!n.lattira.link || typeof n.lattira.link !== "object" || Array.isArray(n.lattira.link)) throw new Error("链接信息无效");
+        for (const key of ["title", "description", "siteName", "image", "icon"] as const) if (n.lattira.link[key] !== undefined && typeof n.lattira.link[key] !== "string") throw new Error("链接信息无效");
+      }
+    }
     const common = {
+      source: n as unknown as Record<string, unknown>,
+      sourceColor: n.color,
       id: n.id,
       x: n.x,
       y: n.y,
@@ -185,7 +221,8 @@ export function fromJsonCanvas(json: string, canvasId: ID): CanvasDoc {
     } else if (n.type === "file" && n.lattira?.assetId) {
       elements.push({ ...common, type: kind === "image" ? "image" : "file", assetId: n.lattira.assetId });
     } else if (n.type === "link") {
-      elements.push({ ...common, type: "link", url: n.url ?? "", ...n.lattira?.link });
+      const link = n.lattira?.link;
+      elements.push({ ...common, type: "link", url: n.url ?? "", title: link?.title, description: link?.description, siteName: link?.siteName, image: link?.image, icon: link?.icon });
     } else {
       // 文本节点，以及暂不能解析的外部文件节点（显示其路径）
       elements.push({ ...common, type: "text", text: n.text ?? n.file ?? "" });
@@ -194,8 +231,20 @@ export function fromJsonCanvas(json: string, canvasId: ID): CanvasDoc {
   const ids = new Set(elements.map((e) => e.id));
   dropBrokenParents(elements);
   if (legacyGroups.size) convertGroups(elements, legacyGroups);
+  dropBrokenParents(elements);
+  const edgeIds = new Set<string>();
+  for (const e of file.edges ?? []) {
+    if (!e || typeof e.id !== "string" || !e.id || edgeIds.has(e.id) || typeof e.fromNode !== "string" || typeof e.toNode !== "string") throw new Error("画布连线 ID 无效");
+    edgeIds.add(e.id);
+    for (const key of ["label", "color"] as const) if (e[key] !== undefined && typeof e[key] !== "string") throw new Error("画布连线内容无效");
+    for (const key of ["fromEnd", "toEnd"] as const) if (e[key] !== undefined && !["none", "arrow"].includes(e[key])) throw new Error("画布连线箭头无效");
+    for (const key of ["fromSide", "toSide"] as const) if (e[key] !== undefined && !["top", "right", "bottom", "left"].includes(e[key])) throw new Error("画布连线方向无效");
+  }
   const edges: Edge[] = (file.edges ?? [])
     .filter((e) => ids.has(e.fromNode) && ids.has(e.toNode))
-    .map((e) => ({ id: e.id, fromId: e.fromNode, toId: e.toNode, label: e.label }));
-  return { canvasId, elements, edges, viewport: file.lattira?.viewport ?? frameContent(elements.filter((e) => !e.parentId)) };
+    .map((e) => ({ ...e, source: e as unknown as Record<string, unknown>, id: e.id, fromId: e.fromNode, toId: e.toNode, label: e.label }));
+  const viewport = file.lattira?.viewport;
+  if (viewport && (![viewport.x, viewport.y, viewport.zoom].every(Number.isFinite) || viewport.zoom <= 0 || viewport.zoom > 100)) throw new Error("画布视口无效");
+  const { nodes: _nodes, edges: _edges, ...source } = file;
+  return { source: source as unknown as Record<string, unknown>, canvasId, elements, edges, viewport: viewport ?? frameContent(elements.filter((e) => !e.parentId)) };
 }

@@ -1,6 +1,9 @@
 import { ArrowDown, ArrowUp, LayoutGrid, List, LocateFixed, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { openContextMenu, type MenuEntry } from "@/features/menu/ContextMenu";
+import { useVirtualRows } from "@/lib/useVirtualRows";
+import { modalOpen } from "@/lib/operations";
+import { AssetImage } from "./AssetImage";
 import { assetEntries } from "@/features/menu/menus";
 import { msg, t, useT } from "@/i18n";
 import { formatRelative } from "@/lib/date";
@@ -55,7 +58,7 @@ const reveal = (a: Asset, canvasId: ID) => useAppStore.getState().navigate({ kin
 /** 位置一栏：第一个画布（可点击跳过去），还有其他画布时显示「等 N 个画布」，悬停看全部 */
 function LocationCell({ asset, locations }: { asset: Asset; locations: Location[] }) {
   const t = useT();
-  if (locations.length === 0) return <span className="is-unused">{t("未被引用")}</span>;
+  if (locations.length === 0) return <span className="is-unused">{asset.refCount ? t("回收站中的画布正在引用") : t("未被引用")}</span>;
   return (
     <span className="asset-location" title={locations.map((l) => l.label).join("\n")}>
       <button
@@ -248,7 +251,7 @@ export function AssetLibrary() {
   // 资源库页面的快捷键：Ctrl+A 全选、Delete 删除、Esc 取消选择
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (useAppStore.getState().searchOpen || isTyping(e.target)) return;
+      if (e.isComposing || modalOpen() || useAppStore.getState().searchOpen || isTyping(e.target)) return;
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "a") {
         e.preventDefault();
@@ -265,6 +268,10 @@ export function AssetLibrary() {
   }, [list, selected, deleteAssets]);
 
   const selectedSize = list.filter((a) => selected.has(a.id)).reduce((sum, a) => sum + a.size, 0);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const gridWindow = useVirtualRows(gridRef, layout === "grid" ? list.length : 0, 228, 180, 14);
+  const tableWindow = useVirtualRows(tableRef, layout === "list" ? list.length : 0, 32);
 
   return (
     <div className="page assets-page" onClick={() => setSelected(new Set())}>
@@ -339,19 +346,22 @@ export function AssetLibrary() {
           </p>
         </div>
       ) : layout === "grid" ? (
-        <div className="asset-grid">
-          {list.map((a, i) => (
-            <button
+        <div className="asset-grid" ref={gridRef}>
+          {gridWindow.top > 0 && <div aria-hidden style={{ gridColumn: "1 / -1", height: gridWindow.top - 14 }} />}
+          {list.slice(gridWindow.start, gridWindow.end).map((a, offset) => (
+            <div
+              role="button" tabIndex={0}
               key={a.id}
               className={`asset-card${selected.has(a.id) ? " is-selected" : ""}`}
-              onClick={(e) => onItemClick(e, i)}
+              onClick={(e) => onItemClick(e, gridWindow.start + offset)}
+              onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); e.currentTarget.click(); } }}
               onDoubleClick={() => void backend.openAsset(a)}
-              onContextMenu={(e) => showMenu(e, i)}
+              onContextMenu={(e) => showMenu(e, gridWindow.start + offset)}
               title={a.name}
             >
               <div className="asset-thumb">
                 {isImageMime(a.mime) && backend.assetUrl(a) ? (
-                  <img src={backend.assetUrl(a)} alt="" loading="lazy" draggable={false} />
+                  <AssetImage asset={a} />
                 ) : (
                   <img className="asset-type-icon" src={fileIconUrl(a.name)} alt="" draggable={false} />
                 )}
@@ -363,12 +373,13 @@ export function AssetLibrary() {
               <div className={`asset-refs${a.refCount === 0 ? " is-unused" : ""}`}>
                 <LocationCell asset={a} locations={locations.get(a.id) ?? []} />
               </div>
-            </button>
+            </div>
           ))}
+          {gridWindow.bottom > 0 && <div aria-hidden style={{ gridColumn: "1 / -1", height: gridWindow.bottom - 14 }} />}
         </div>
       ) : (
         <div className="asset-table-wrap">
-          <table className="asset-table">
+          <table className="asset-table" ref={tableRef}>
             <thead>
               <tr>
                 {COLUMNS.map((c) => (
@@ -380,13 +391,14 @@ export function AssetLibrary() {
               </tr>
             </thead>
             <tbody>
-              {list.map((a, i) => (
+              {tableWindow.top > 0 && <tr aria-hidden style={{ height: tableWindow.top }}><td colSpan={5} /></tr>}
+              {list.slice(tableWindow.start, tableWindow.end).map((a, offset) => (
                 <tr
                   key={a.id}
                   className={selected.has(a.id) ? "is-selected" : ""}
-                  onClick={(e) => onItemClick(e, i)}
+                  onClick={(e) => onItemClick(e, tableWindow.start + offset)}
                   onDoubleClick={() => void backend.openAsset(a)}
-                  onContextMenu={(e) => showMenu(e, i)}
+                  onContextMenu={(e) => showMenu(e, tableWindow.start + offset)}
                 >
                   <td className="col-name">
                     <img src={fileIconUrl(a.name)} alt="" draggable={false} />
@@ -400,6 +412,7 @@ export function AssetLibrary() {
                   </td>
                 </tr>
               ))}
+              {tableWindow.bottom > 0 && <tr aria-hidden style={{ height: tableWindow.bottom }}><td colSpan={5} /></tr>}
             </tbody>
           </table>
         </div>

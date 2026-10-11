@@ -1,4 +1,5 @@
 import { RotateCcw, Trash2, X } from "lucide-react";
+import { modalOpen } from "@/lib/operations";
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { openContextMenu } from "@/features/menu/ContextMenu";
 import { CanvasThumb } from "@/features/project/CanvasThumb";
@@ -148,7 +149,7 @@ export function TrashView() {
   // Ctrl+A 全选、Delete 永久删除、Esc 取消选择
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (useAppStore.getState().searchOpen || isTyping(e.target)) return;
+      if (e.isComposing || modalOpen() || useAppStore.getState().searchOpen || isTyping(e.target)) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
         e.preventDefault();
         setSelected(new Set(list.map(keyOf)));

@@ -1,3 +1,5 @@
+import { operationTarget, modalOpen } from "@/lib/operations";
+import { sanitizeName } from "@/lib/names";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -197,7 +199,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
     canvas()
       .load(canvasId)
       .catch((e) => app().showToast(t("打开画布失败：{error}", { error: String(e) })));
-    return () => void canvas().flush();
+    return () => void canvas().flush().catch(() => {});
   }, [canvasId]);
 
   useEffect(() => {
@@ -314,9 +316,10 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   // ---- 导入文件 ----
   /** 导入文件放到画布上，左上角在 at；parentId 不为空时放进那个文件夹 */
   const placeAssets = useCallback(async (load: (task: string) => Promise<Asset[]>, at: Point, parentId?: ID) => {
+    const operation = operationTarget(parentId);
     try {
       const imported = await runImport(load, { done: (a) => importedMessage(a.length) });
-      if (!imported?.length) return;
+      if (!imported?.length || !operation.valid()) return;
       app().addAssets(imported);
       // 与这一层已有的文件、文件夹重名时要求改名
       const cards = await resolveIncoming(
@@ -324,6 +327,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         parentId,
         "ask",
       );
+      if (!operation.valid()) return;
       canvas().addElements(cards, { select: !parentId });
       if (parentId) {
         flash(parentId);
@@ -336,16 +340,18 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
 
   /** 按路径导入文件和文件夹：文件夹变成文件夹卡片，里面的内容放进去；parentId 不为空时全部放进那个文件夹 */
   const placeTree = useCallback(async (paths: string[], at: Point, parentId?: ID) => {
+    const operation = operationTarget(parentId);
     try {
       const nodes = await runImport((task) => backend.importTree(paths, task), {
         key: pathsKey(paths),
         done: (n) => importedMessage(assetsInTree(n).length),
       });
-      if (!nodes) return;
+      if (!nodes || !operation.valid()) return;
       const assets = assetsInTree(nodes);
       if (assets.length === 0 && nodes.length === 0) return;
       app().addAssets(assets);
       const added = await resolveIncoming(elementsForTree(nodes, at, parentId), parentId, "ask");
+      if (!operation.valid()) return;
       canvas().addElements(added, { select: !parentId });
       if (parentId) {
         flash(parentId);
@@ -359,6 +365,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   /** 选择文件（或文件夹）放到画布上；不指定位置时放在视口中央；parentId 不为空时放进那个文件夹 */
   const pickFiles = useCallback(async (where?: Point, folders = false, parentId?: ID) => {
     if (!canvas().doc) return;
+    const operation = operationTarget(parentId);
     const at = where ?? viewCenterWorld();
     if (backend.kind === "tauri") {
       const picked = await open({
@@ -367,7 +374,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         title: folders ? t("选择要放到画布上的文件夹") : t("选择要放到画布上的文件"),
       });
       const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
-      if (paths.length) await placeTree(paths, at, parentId);
+      if (paths.length && operation.valid()) await placeTree(paths, at, parentId);
     } else if (folders) {
       app().showToast(t("浏览器预览模式不支持按路径导入"));
     } else {
@@ -376,7 +383,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       input.multiple = true;
       input.onchange = () => {
         const files = Array.from(input.files ?? []);
-        if (files.length) void placeAssets((task) => backend.importBlobs(files, task), at, parentId);
+        if (files.length && operation.valid()) void placeAssets((task) => backend.importBlobs(files, task), at, parentId);
       };
       input.click();
     }
@@ -467,6 +474,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   // ---- 键盘与剪贴板 ----
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing || modalOpen()) return;
       // Ctrl+F 换成画布内查找：浏览器自带的网页查找看不到视口外的卡片和图片中的文字
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         if (app().searchOpen || !canvas().doc) return;
@@ -697,7 +705,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         // 同一层里已有这个名字：保留原来的名字
         const error = folderRenameError(el, value);
         if (error) app().showToast(error);
-        else s.updateElements({ [id]: { label: value } });
+        else s.updateElements({ [id]: { label: sanitizeName(value) } });
       }
     },
   };
@@ -1003,6 +1011,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       {/* transform 由上面的视口订阅直接写入，不经过 React */}
       <div className="canvas-world" ref={worldRef}>
         <EdgeLayer
+          visibleRect={cull?.rect}
           edges={doc.edges}
           elements={doc.elements}
           selectedEdgeId={selectedEdgeId}

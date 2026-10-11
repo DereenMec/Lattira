@@ -1,5 +1,12 @@
 /** 英文翻译：键为界面中的中文原文。缺少的条目运行 npm run i18n:check 查看 */
 export const en: Record<string, string> = {
+  "操作已取消": "Operation cancelled",
+  "编辑文本": "Edit text",
+  "加载更多": "Load more",
+  "画布已被其他页面修改，本地内容已保存到恢复副本": "Another page changed this canvas. Your draft has been saved as a recovery copy.",
+  "回收站中的画布正在引用": "Referenced by a canvas in Trash",
+  "另存并重新打开": "Save a recovery copy and reopen",
+  "本地内容已另存，已重新打开磁盘上的画布": "Your draft was saved separately. The canvas on disk has been reopened.",
   // ---- 通用 ----
   "栖页": "Lattira",
   "栖页 · Lattira": "Lattira",
@@ -80,10 +87,11 @@ export const en: Record<string, string> = {
   // ---- 欢迎 ----
   "选择工作区文件夹": "Choose workspace folder",
   "进入浏览器预览": "Open browser preview",
+  "无效的 JSON Canvas 文件": "Invalid JSON Canvas file",
   "工作区就是你磁盘上的一个普通文件夹，所有画布和导入的文件都保存在里面。":
     "A workspace is a regular folder on your disk. All canvases and imported files are stored inside it.",
-  "当前在浏览器中运行：数据只保存在本浏览器里，导入的文件刷新后不会保留。":
-    "Running in a browser: data is kept in this browser only, and imported files are lost on reload.",
+  "当前在浏览器中运行：画布与导入的文件保存在本浏览器里；清除网站数据会将它们删除。":
+    "Running in a browser: canvases and imported files are stored in this browser. Clearing site data removes them.",
   "选择或新建一个文件夹作为栖页工作区": "Choose or create a folder for your Lattira workspace",
   "工作区缺少未分类项目": "The workspace has no Unsorted project",
   "打开上次的工作区失败：{error}": "Could not reopen the last workspace: {error}",

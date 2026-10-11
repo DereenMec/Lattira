@@ -1,7 +1,9 @@
 import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useT } from "@/i18n";
 import { useCanvasStore } from "@/store/canvasStore";
+import { registerEditor } from "@/lib/operations";
+import { useDialog } from "@/features/menu/useDialog";
 
 /**
  * 双击文本卡片后打开的大编辑窗口。卡片上直接编辑只适合短句，长文在这里写。
@@ -14,8 +16,22 @@ export function TextEditorDialog() {
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
   const initial = useRef("");
-
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const latest = useRef({ value, editorId, el });
+  latest.current = { value, editorId, el };
+  useDialog(dialogRef, !!editorId);
   useEffect(() => {
+    if (!editorId) return;
+    return registerEditor(() => {
+      const draft = latest.current;
+      if (draft.editorId && draft.el?.type === "text" && draft.value !== draft.el.text) {
+        useCanvasStore.getState().updateElements({ [draft.editorId]: { text: draft.value } });
+        initial.current = draft.value;
+      }
+    });
+  }, [editorId]);
+
+  useLayoutEffect(() => {
     if (!editorId || el?.type !== "text") return;
     initial.current = el.text;
     setValue(el.text);
@@ -44,7 +60,7 @@ export function TextEditorDialog() {
 
   return (
     <div className="overlay editor-overlay" onPointerDown={close}>
-      <div className="dialog text-editor" onPointerDown={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("编辑文本")} className="dialog text-editor" onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => { e.stopPropagation(); if (!e.nativeEvent.isComposing && (e.key === "Escape" || (e.key === "Enter" && (e.ctrlKey || e.metaKey)))) { e.preventDefault(); close(); } }}>
         <header>
           <span className="text-editor-title">{title}</span>
           <span className="text-editor-meta">
@@ -58,9 +74,10 @@ export function TextEditorDialog() {
           ref={ref}
           value={value}
           spellCheck={false}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => { latest.current.value = e.target.value; setValue(e.target.value); }}
           onKeyDown={(e) => {
             e.stopPropagation();
+            if (e.nativeEvent.isComposing) return;
             if (e.key === "Escape" || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) {
               e.preventDefault();
               close();

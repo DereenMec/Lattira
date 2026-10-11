@@ -18,7 +18,9 @@ fn err(e: impl std::fmt::Display) -> Error {
 }
 
 fn cards_format() -> Result<u32> {
-    raw::register_format(CARDS_FORMAT).map(|f| f.get()).ok_or_else(|| err("无法注册剪贴板格式"))
+    raw::register_format(CARDS_FORMAT)
+        .map(|f| f.get())
+        .ok_or_else(|| err("无法注册剪贴板格式"))
 }
 
 pub fn write(files: &[String], text: Option<&str>, cards: Option<&str>) -> Result<()> {
@@ -87,7 +89,12 @@ mod tests {
         std::fs::write(&file, "hello").unwrap();
         let path = file.to_string_lossy().into_owned();
 
-        write(&[path.clone()], Some("卡片文字"), Some(r#"{"app":"lattira"}"#)).unwrap();
+        write(
+            &[path.clone()],
+            Some("卡片文字"),
+            Some(r#"{"app":"lattira"}"#),
+        )
+        .unwrap();
         let c = read().unwrap();
         assert_eq!(c.files, vec![path]);
         assert_eq!(c.text.as_deref(), Some("卡片文字"));

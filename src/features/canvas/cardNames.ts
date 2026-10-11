@@ -8,7 +8,8 @@
 import { promptText } from "@/features/menu/PromptDialog";
 import { t } from "@/i18n";
 import { canMoveInto, cardName as cardNameOf, namesAt as namesAtOf, withDescendants } from "@/lib/folders";
-import { nameKey, splitName, uniqueName } from "@/lib/names";
+import { nameKey, sanitizeName, sanitizeFileName, splitName, uniqueName } from "@/lib/names";
+import { operationTarget } from "@/lib/operations";
 import type { Point } from "@/lib/geometry";
 import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
@@ -34,7 +35,7 @@ export function newFolderLabel(parentId?: ID): string {
 
 /** 文件名没写扩展名时沿用原来的（与后台改名的规则一致），用来检查重名 */
 export function withExt(name: string, original: string): string {
-  return splitName(name, true)[1] ? name.trim() : `${name.trim()}${splitName(original, true)[1]}`;
+  return sanitizeFileName(splitName(name, true)[1] ? name.trim() : `${name.trim()}${splitName(original, true)[1]}`);
 }
 
 /** 改名检查：name 在 taken 里时返回提示文字 */
@@ -47,13 +48,9 @@ export function nameError(name: string, taken: ReadonlySet<string>): string | nu
  * 复制一份独立的文件，别处不受影响
  */
 async function assetNamed(asset: Asset, name: string, cardId: ID, copy: boolean): Promise<Asset> {
-  const doc = canvas().doc;
-  const usedElsewhere =
-    copy ||
-    asset.canvasIds.some((c) => c !== doc?.canvasId) ||
-    !!doc?.elements.some((e) => e.id !== cardId && "assetId" in e && e.assetId === asset.id);
-  const result = usedElsewhere ? await backend.copyAssetAs(asset.id, name) : await backend.renameAsset(asset, name);
-  app().addAssets([result]);
+  // An immutable original makes rename undoable and protects unsaved/trash references.
+  void cardId; void copy;
+  const result = await backend.copyAssetAs(asset.id, name);
   return result;
 }
 
@@ -62,6 +59,18 @@ export interface NamePlan {
   patches: Record<ID, ElementPatch>;
   /** 用户选择跳过的卡片 */
   skipped: Set<ID>;
+  copies: { cardId: ID; asset: Asset; name: string }[];
+  valid(): boolean;
+}
+
+async function applyNames(plan: NamePlan): Promise<void> {
+  for (const item of plan.copies) {
+    if (!plan.valid()) throw new Error(t("操作已取消"));
+    const named = await assetNamed(item.asset, item.name, item.cardId, true);
+    if (!plan.valid()) throw new Error(t("操作已取消"));
+    app().addAssets([named]);
+    plan.patches[item.cardId] = { assetId: named.id };
+  }
 }
 
 /**
@@ -73,9 +82,11 @@ export async function planNames(
   parentId: ID | undefined,
   mode: "copy" | "ask",
   exclude: ReadonlySet<ID> = new Set(),
+  elements?: CanvasElement[],
 ): Promise<NamePlan> {
-  const plan: NamePlan = { patches: {}, skipped: new Set() };
-  const taken = namesAt(parentId, new Set([...exclude, ...items.map((i) => i.id)]));
+  const target = operationTarget();
+  const plan: NamePlan = { patches: {}, skipped: new Set(), copies: [], valid: target.valid };
+  const taken = namesAt(parentId, new Set([...exclude, ...items.map((i) => i.id)]), elements);
   for (const el of items) {
     const name = cardName(el);
     if (name === null) continue;
@@ -92,8 +103,9 @@ export async function planNames(
             message: t("此位置已有名为「{name}」的{kind}，请换一个名字；跳过则不放入这一项。", { name, kind }),
             selectStem: file,
             cancelLabel: t("跳过"),
-            validate: (v) => nameError(file ? withExt(v, name) : v, taken),
+            validate: (v) => nameError(file ? withExt(v, name) : sanitizeName(v), taken),
           });
+    if (!target.valid()) throw new Error(t("操作已取消"));
     if (newName === null) {
       plan.skipped.add(el.id);
       continue;
@@ -102,12 +114,12 @@ export async function planNames(
       if (file && "assetId" in el) {
         const asset = app().assets.get(el.assetId);
         if (!asset) throw new Error(t("找不到这个文件"));
-        const named = await assetNamed(asset, newName, el.id, mode === "copy");
-        plan.patches[el.id] = { assetId: named.id };
-        taken.add(nameKey(named.name));
+        const normalized = withExt(newName, name);
+        plan.copies.push({ cardId: el.id, asset, name: normalized });
+        taken.add(nameKey(normalized));
       } else {
-        plan.patches[el.id] = { label: newName };
-        taken.add(nameKey(newName));
+        plan.patches[el.id] = { label: sanitizeName(newName) };
+        taken.add(nameKey(sanitizeName(newName)));
       }
     } catch (e) {
       app().showToast(t("重命名失败：{error}", { error: String(e) }));
@@ -126,11 +138,24 @@ export async function resolveIncoming(
   target: ID | undefined,
   mode: "copy" | "ask",
 ): Promise<CanvasElement[]> {
-  const top = elements.filter((e) => (e.parentId ?? undefined) === target);
-  const plan = await planNames(top, target, mode);
-  const dropped = withDescendants(elements, plan.skipped);
-  if (plan.skipped.size) app().showToast(t("已跳过 {n} 项", { n: plan.skipped.size }));
-  return elements.filter((e) => !dropped.has(e.id)).map((e) => (plan.patches[e.id] ? ({ ...e, ...plan.patches[e.id] } as CanvasElement) : e));
+  const patches: Record<ID, ElementPatch> = {};
+  const skipped = new Set<ID>();
+  const plans: NamePlan[] = [];
+  const levels = new Set([target, ...elements.filter((e) => e.type === "folder").map((e) => e.id)]);
+  for (const level of levels) {
+    const items = elements.filter((e) => e.parentId === level);
+    const plan = await planNames(items, level, mode, new Set(), [...(canvas().doc?.elements ?? []), ...elements]);
+    plans.push(plan);
+    for (const id of plan.skipped) skipped.add(id);
+  }
+  const dropped = withDescendants(elements, skipped);
+  for (const plan of plans) {
+    plan.copies = plan.copies.filter((c) => !dropped.has(c.cardId));
+    await applyNames(plan);
+    Object.assign(patches, plan.patches);
+  }
+  if (skipped.size) app().showToast(t("已跳过 {n} 项", { n: skipped.size }));
+  return elements.filter((e) => !dropped.has(e.id)).map((e) => (patches[e.id] ? ({ ...e, ...patches[e.id] } as CanvasElement) : e));
 }
 
 /** 放进文件夹（拖进文件夹、移到文件夹）；重名时要求改名，跳过的不移动。有东西移进去时返回 true */
@@ -139,6 +164,7 @@ export async function moveIntoFolderNamed(ids: ID[], folderId: ID): Promise<bool
   if (!doc || !canMoveInto(doc.elements, ids, folderId)) return false;
   const items = doc.elements.filter((e) => ids.includes(e.id) && e.parentId !== folderId);
   const plan = await planNames(items, folderId, "ask");
+  await applyNames(plan);
   const moving = ids.filter((id) => !plan.skipped.has(id));
   return moving.length > 0 && canvas().moveIntoFolder(moving, folderId, plan.patches);
 }
@@ -149,6 +175,7 @@ export async function moveToCanvasNamed(ids: ID[], at: Point): Promise<void> {
   if (!doc) return;
   const items = doc.elements.filter((e) => ids.includes(e.id) && e.parentId);
   const plan = await planNames(items, undefined, "ask");
+  await applyNames(plan);
   const moving = items.map((e) => e.id).filter((id) => !plan.skipped.has(id));
   if (moving.length) canvas().moveToCanvas(moving, at, plan.patches);
 }
@@ -164,10 +191,11 @@ export async function dissolveFolderNamed(folderId: ID): Promise<void> {
     app().showToast(t("有重名的内容没有改名，文件夹没有解散"));
     return;
   }
+  await applyNames(plan);
   canvas().dissolveFolder(folderId, plan.patches);
 }
 
 /** 文件夹卡片改名的检查（画布上原地改名、重命名对话框） */
 export function folderRenameError(folder: CanvasElement, label: string): string | null {
-  return nameError(label.trim() || t("未命名文件夹"), namesAt(folder.parentId, new Set([folder.id])));
+  return nameError(sanitizeName(label.trim() || t("未命名文件夹")), namesAt(folder.parentId, new Set([folder.id])));
 }

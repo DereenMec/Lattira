@@ -26,6 +26,10 @@ export function CanvasActions({ meta }: { meta: CanvasMeta }) {
   return (
     <div className="tabbar-actions">
       <span className={`save-state is-${saveState}`}>{t(SAVE_LABEL[saveState])}</span>
+      {saveState === "error" && <>
+        <button className="btn ghost" onClick={() => void useCanvasStore.getState().flush().catch(() => {})}>{t("重试")}</button>
+        <button className="btn ghost" onClick={() => void useCanvasStore.getState().recover().catch((e) => useAppStore.getState().showToast(String(e)))}>{t("另存并重新打开")}</button>
+      </>}
       <button className="icon-btn" onClick={() => void exportCanvas(meta)} title={t("导出画布（含引用的文件）")}>
         <FileOutput size={15} />
       </button>

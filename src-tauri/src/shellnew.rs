@@ -13,8 +13,8 @@ use windows::core::{HSTRING, PWSTR};
 use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ, REG_BINARY, REG_EXPAND_SZ,
-    REG_SZ, REG_VALUE_TYPE,
+    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
+    REG_BINARY, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
 };
 use windows::Win32::UI::Shell::SHLoadIndirectString;
 
@@ -67,7 +67,18 @@ impl Key {
         let mut buf = [0u16; 256];
         for i in 0.. {
             let mut len = buf.len() as u32;
-            let err = unsafe { RegEnumKeyExW(self.0, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None) };
+            let err = unsafe {
+                RegEnumKeyExW(
+                    self.0,
+                    i,
+                    Some(PWSTR(buf.as_mut_ptr())),
+                    &mut len,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
             if err == ERROR_NO_MORE_ITEMS {
                 break;
             }
@@ -84,12 +95,22 @@ impl Key {
         let name = HSTRING::from(name);
         let mut ty = REG_VALUE_TYPE::default();
         let mut size = 0u32;
-        let err = unsafe { RegQueryValueExW(self.0, &name, None, Some(&mut ty), None, Some(&mut size)) };
+        let err =
+            unsafe { RegQueryValueExW(self.0, &name, None, Some(&mut ty), None, Some(&mut size)) };
         if err != ERROR_SUCCESS {
             return None;
         }
         let mut data = vec![0u8; size as usize];
-        let err = unsafe { RegQueryValueExW(self.0, &name, None, Some(&mut ty), Some(data.as_mut_ptr()), Some(&mut size)) };
+        let err = unsafe {
+            RegQueryValueExW(
+                self.0,
+                &name,
+                None,
+                Some(&mut ty),
+                Some(data.as_mut_ptr()),
+                Some(&mut size),
+            )
+        };
         if err != ERROR_SUCCESS {
             return None;
         }
@@ -113,8 +134,13 @@ impl Key {
 }
 
 fn utf16(data: &[u8]) -> String {
-    let wide: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-    String::from_utf16_lossy(&wide).trim_end_matches('\0').to_string()
+    let wide: Vec<u16> = data
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&wide)
+        .trim_end_matches('\0')
+        .to_string()
 }
 
 fn expand(s: &str) -> String {
@@ -151,10 +177,14 @@ fn locate_template(file: &str) -> Option<PathBuf> {
     }
     let dirs = [
         std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join(r"Microsoft\Windows\Templates")),
-        std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join(r"Microsoft\Windows\Templates")),
+        std::env::var_os("ProgramData")
+            .map(|d| PathBuf::from(d).join(r"Microsoft\Windows\Templates")),
         std::env::var_os("SystemRoot").map(|d| PathBuf::from(d).join("ShellNew")),
     ];
-    dirs.into_iter().flatten().map(|d| d.join(file)).find(|f| f.is_file())
+    dirs.into_iter()
+        .flatten()
+        .map(|d| d.join(file))
+        .find(|f| f.is_file())
 }
 
 /// 一个扩展名的「新建」信息；不能在栖页里新建时为 None
@@ -165,14 +195,24 @@ fn entry(classes: &Key, ext: &str) -> Option<(NewFileType, Template)> {
         .as_deref()
         .and_then(|p| ext_key.sub(&format!(r"{p}\ShellNew")))
         .or_else(|| ext_key.sub("ShellNew"))?;
-    if ["Command", "Handler", "Directory"].iter().any(|v| shell_new.has(v)) {
+    if ["Command", "Handler", "Directory"]
+        .iter()
+        .any(|v| shell_new.has(v))
+    {
         return None;
     }
-    if shell_new.sub("Config").is_some_and(|c| c.has("IsOptIn") || c.has("IsFolder")) {
+    if shell_new
+        .sub("Config")
+        .is_some_and(|c| c.has("IsOptIn") || c.has("IsFolder"))
+    {
         return None;
     }
     let template = if let Some((ty, data)) = shell_new.raw("Data") {
-        Template::Bytes(if ty == REG_BINARY { data } else { utf16(&data).into_bytes() })
+        Template::Bytes(if ty == REG_BINARY {
+            data
+        } else {
+            utf16(&data).into_bytes()
+        })
     } else if let Some(file) = shell_new.string("FileName") {
         // 模板文件不在了（例如卸载了 Office 但注册表还留着），资源管理器也新建不出来
         Template::File(locate_template(&expand(&file))?)
@@ -186,16 +226,26 @@ fn entry(classes: &Key, ext: &str) -> Option<(NewFileType, Template)> {
         .and_then(indirect)
         .or_else(|| {
             let prog = classes.sub(progid.as_deref()?)?;
-            prog.string("FriendlyTypeName").and_then(indirect).or_else(|| prog.string(""))
+            prog.string("FriendlyTypeName")
+                .and_then(indirect)
+                .or_else(|| prog.string(""))
         })
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())?;
-    Some((NewFileType { ext: ext.to_lowercase(), name }, template))
+    Some((
+        NewFileType {
+            ext: ext.to_lowercase(),
+            name,
+        },
+        template,
+    ))
 }
 
 /// 当前系统「新建」菜单里能在栖页中新建的文件类型，按名字排序
 pub fn list() -> Vec<NewFileType> {
-    let Some(classes) = Key::classes_root() else { return Vec::new() };
+    let Some(classes) = Key::classes_root() else {
+        return Vec::new();
+    };
     let mut out: Vec<NewFileType> = classes
         .subkeys()
         .into_iter()
@@ -225,7 +275,12 @@ mod tests {
         let types = list();
         println!("用时 {:?}", start.elapsed());
         for t in &types {
-            println!("{} {} {:?}", t.ext, t.name, template(&t.ext).map(|(_, tpl)| tpl));
+            println!(
+                "{} {} {:?}",
+                t.ext,
+                t.name,
+                template(&t.ext).map(|(_, tpl)| tpl)
+            );
         }
     }
 

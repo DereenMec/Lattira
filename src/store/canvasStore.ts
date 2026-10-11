@@ -20,6 +20,7 @@ import type {
   Viewport,
 } from "@/types/model";
 import { t } from "@/i18n";
+import { bindOperationContext, commitEditors, contentHash, invalidateOperations } from "@/lib/operations";
 import { useAppStore } from "./appStore";
 
 /** 撤销历史与变化统计只关心元素和连线；视口变化不算编辑 */
@@ -57,6 +58,8 @@ interface CanvasState {
   load(canvasId: ID): Promise<void>;
   /** 离开画布前把未保存的修改写盘 */
   flush(): Promise<void>;
+  reset(): void;
+  recover(): Promise<void>;
 
   setViewport(vp: Viewport): void;
   select(ids: ID[], additive?: boolean): void;
@@ -71,7 +74,7 @@ interface CanvasState {
    * 后台补充的信息（如链接预览）：不进撤销历史，同时补到历史快照里，撤销其他操作时不会丢。
    * 画布不在编辑中时改写后台标签页的缓存或磁盘上的文件。
    */
-  patchQuietly(canvasId: ID, patches: Record<ID, ElementPatch>): Promise<void>;
+  patchQuietly(canvasId: ID, patches: Record<ID, ElementPatch>, expectedUrl?: string): Promise<void>;
   deleteSelection(): void;
   /** 删除元素；删除文件夹时连同里面的内容 */
   deleteElements(ids: ID[]): void;
@@ -133,6 +136,20 @@ interface CachedCanvas {
   lastSaved: Snapshot;
 }
 const cache = new Map<ID, CachedCanvas>();
+const diskHashes = new Map<ID, string>();
+let dirty = false;
+let contentDirty = false;
+let epoch = 0;
+const MAX_CACHED = 6;
+
+function trimHistory(list: Snapshot[]): Snapshot[] {
+  let cost = 0;
+  for (let i = list.length - 1; i >= 0; i--) {
+    cost += list[i].elements.length + list[i].edges.length;
+    if (cost > 100_000) return list.slice(i + 1);
+  }
+  return list.slice(-HISTORY_LIMIT);
+}
 
 /** 画布文件被别处改过（例如删除资源时移除了卡片）后调用，下次打开时重新从磁盘读取 */
 export function dropCanvasCache(ids: ID[]) {
@@ -144,8 +161,8 @@ const snapshotOf = (doc: CanvasDoc): Snapshot => ({ elements: doc.elements, edge
 function diff(prev: Snapshot, next: Snapshot): ChangeSummary {
   const prevEls = new Map(prev.elements.map((e) => [e.id, e]));
   const nextEls = new Map(next.elements.map((e) => [e.id, e]));
-  const prevEdges = new Set(prev.edges.map((e) => e.id));
-  const nextEdges = new Set(next.edges.map((e) => e.id));
+  const prevEdges = new Map(prev.edges.map((e) => [e.id, e]));
+  const nextEdges = new Map(next.edges.map((e) => [e.id, e]));
   let added = 0;
   let modified = 0;
   let removed = 0;
@@ -155,8 +172,11 @@ function diff(prev: Snapshot, next: Snapshot): ChangeSummary {
     else if (old !== el) modified++;
   }
   for (const id of prevEls.keys()) if (!nextEls.has(id)) removed++;
-  for (const id of nextEdges) if (!prevEdges.has(id)) added++;
-  for (const id of prevEdges) if (!nextEdges.has(id)) removed++;
+  for (const [id, edge] of nextEdges) {
+    if (!prevEdges.has(id)) added++;
+    else if (JSON.stringify(prevEdges.get(id)) !== JSON.stringify(edge)) modified++;
+  }
+  for (const id of prevEdges.keys()) if (!nextEdges.has(id)) removed++;
   return { added, modified, removed };
 }
 
@@ -205,43 +225,51 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
     const before = snapshotOf(doc);
     const after = next(before);
     if (after === before) return;
-    past = [...past, before].slice(-HISTORY_LIMIT);
+    past = trimHistory([...past, before]);
     future = [];
-    set({ doc: { ...doc, ...after }, canUndo: true, canRedo: false });
+    set({ doc: { ...doc, ...after }, canUndo: past.length > 0, canRedo: false });
     scheduleSave();
   }
 
   function scheduleSave() {
+    dirty = contentDirty = true;
     set({ saveState: "pending" });
     window.clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => void save(), SAVE_DELAY);
+    saveTimer = window.setTimeout(() => void save().catch(() => {}), SAVE_DELAY);
   }
 
   async function save() {
     window.clearTimeout(saveTimer);
     saveTimer = undefined;
-    if (savingPromise) await savingPromise;
-    const { doc } = get();
-    if (!doc) return;
-    const current = snapshotOf(doc);
-    const changes = diff(lastSaved, current);
-    set({ saveState: "saving" });
-    const run = async () => {
+    if (savingPromise) return savingPromise;
+    const scope = epoch;
+    const run = async () => { while (dirty && get().doc && scope === epoch) {
+      const doc = get().doc!;
+      const current = snapshotOf(doc);
+      const changes = diff(lastSaved, current);
+      const rebuild = contentDirty;
+      dirty = contentDirty = false;
+      set({ saveState: "saving" });
       try {
         const { assets } = useAppStore.getState();
         const content = toJsonCanvas({ ...doc, viewport: get().viewport }, assets);
-        const meta = await backend.saveCanvas(doc.canvasId, content, indexOf(doc, assets), changes);
+        const meta = await backend.saveCanvas(doc.canvasId, content, rebuild ? indexOf(doc, assets) : null, changes, diskHashes.get(doc.canvasId));
+        diskHashes.set(doc.canvasId, await contentHash(content));
+        if (scope !== epoch) return;
         lastSaved = current;
         useAppStore.getState().canvasSaved(meta);
-        if (get().doc?.canvasId === doc.canvasId && saveTimer === undefined) set({ saveState: "saved" });
+        if (rebuild) void useAppStore.getState().refreshAssets().catch(console.error);
+        if (!dirty) set({ saveState: "saved" });
       } catch (e) {
+        dirty = true;
+        contentDirty ||= rebuild;
         set({ saveState: "error" });
         useAppStore.getState().showToast(t("保存失败：{error}", { error: String(e) }));
+        throw e;
       }
-    };
+    }};
     savingPromise = run();
-    await savingPromise;
-    savingPromise = null;
+    try { await savingPromise; } finally { savingPromise = null; }
   }
 
   return {
@@ -272,9 +300,13 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
           future,
           lastSaved,
         });
+        while (cache.size > MAX_CACHED) cache.delete(cache.keys().next().value!);
       }
       const cached = cache.get(canvasId);
-      if (cached) {
+      const content = await backend.loadCanvas(canvasId);
+      const hash = await contentHash(content);
+      if (seq !== loadSeq) return;
+      if (cached && diskHashes.get(canvasId) === hash) {
         cache.delete(canvasId);
         ({ past, future, lastSaved } = cached);
         set({
@@ -292,8 +324,8 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
         });
         return;
       }
-      const content = await backend.loadCanvas(canvasId);
-      if (seq !== loadSeq) return;
+      cache.delete(canvasId);
+      diskHashes.set(canvasId, hash);
       const doc = fromJsonCanvas(content, canvasId);
       past = [];
       future = [];
@@ -314,16 +346,27 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
     },
 
     async flush() {
-      if (saveTimer !== undefined) await save();
-      else if (savingPromise) await savingPromise;
+      commitEditors();
+      if (savingPromise) await savingPromise;
+      if (dirty || saveTimer !== undefined) await save();
+    },
+
+    reset() {
+      epoch++; loadSeq++;
+      window.clearTimeout(saveTimer); saveTimer = undefined;
+      cache.clear(); diskHashes.clear(); past = []; future = [];
+      dirty = contentDirty = false; gestureBase = null;
+      lastSaved = { elements: [], edges: [] };
+      set({ doc: null, editingId: null, editorId: null, folderView: null, selectedIds: [], saveState: "saved", canUndo: false, canRedo: false });
     },
 
     setViewport(viewport) {
       if (!get().doc) return;
       set({ viewport });
+      dirty = true;
       // 视口只需要随下一次保存落盘，不单独计入编辑
       if (saveTimer === undefined && get().saveState === "saved") {
-        saveTimer = window.setTimeout(() => void save(), SAVE_DELAY * 3);
+        saveTimer = window.setTimeout(() => void save().catch(() => {}), SAVE_DELAY * 3);
       }
     },
 
@@ -359,9 +402,21 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       commit((s) => ({ ...s, elements: applyPatches(s.elements, patches, now) }));
     },
 
-    async patchQuietly(canvasId, patches) {
+    async recover() {
+      commitEditors();
+      if (savingPromise) await savingPromise.catch(() => {});
+      const { doc, viewport } = get();
+      if (!doc) return;
+      await backend.saveRecovery(doc.canvasId, toJsonCanvas({ ...doc, viewport }, useAppStore.getState().assets));
+      get().reset();
+      await get().load(doc.canvasId);
+      useAppStore.getState().showToast(t("本地内容已另存，已重新打开磁盘上的画布"));
+    },
+
+    async patchQuietly(canvasId, patches, expectedUrl) {
       const { doc } = get();
       if (doc?.canvasId === canvasId) {
+        if (expectedUrl && !doc.elements.some((e) => patches[e.id] && e.type === "link" && e.url === expectedUrl)) return;
         if (!doc.elements.some((e) => patches[e.id])) return;
         past = patchSnapshots(past, patches);
         future = patchSnapshots(future, patches);
@@ -371,21 +426,28 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
         return;
       }
       const cached = cache.get(canvasId);
-      const target = cached?.doc ?? fromJsonCanvas(await backend.loadCanvas(canvasId), canvasId);
+      const scope = epoch;
+      const raw = await backend.loadCanvas(canvasId);
+      if (scope !== epoch) return;
+      if (get().doc?.canvasId === canvasId) return get().patchQuietly(canvasId, patches, expectedUrl);
+      const target = cached && diskHashes.get(canvasId) === await contentHash(raw) ? cached.doc : fromJsonCanvas(raw, canvasId);
+      if (expectedUrl && !target.elements.some((e) => patches[e.id] && e.type === "link" && e.url === expectedUrl)) return;
       if (!target.elements.some((e) => patches[e.id])) return;
       const next = { ...target, elements: applyPatches(target.elements, patches, Date.now()) };
-      if (cached) {
-        cached.doc = next;
-        cached.past = patchSnapshots(cached.past, patches);
-        cached.future = patchSnapshots(cached.future, patches);
-      }
       const { assets } = useAppStore.getState();
       const viewport = cached?.viewport ?? next.viewport;
       const meta = await backend.saveCanvas(canvasId, toJsonCanvas({ ...next, viewport }, assets), indexOf(next, assets), {
         added: 0,
         modified: 1,
         removed: 0,
-      });
+      }, await contentHash(raw));
+      diskHashes.set(canvasId, await contentHash(toJsonCanvas({ ...next, viewport }, assets)));
+      if (cached) {
+        cached.doc = next;
+        cached.lastSaved = snapshotOf(next);
+        cached.past = patchSnapshots(cached.past, patches);
+        cached.future = patchSnapshots(cached.future, patches);
+      }
       useAppStore.getState().canvasSaved(meta);
     },
 
@@ -426,7 +488,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
     reverseEdge(id) {
       commit((s) => ({
         ...s,
-        edges: s.edges.map((e) => (e.id === id ? { ...e, fromId: e.toId, toId: e.fromId } : e)),
+        edges: s.edges.map((e) => (e.id === id ? { ...e, fromId: e.toId, toId: e.fromId, fromSide: e.toSide, toSide: e.fromSide } : e)),
       }));
     },
 
@@ -605,7 +667,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       const base = gestureBase;
       gestureBase = null;
       if (!doc || !base || base.elements === doc.elements) return;
-      past = [...past, base].slice(-HISTORY_LIMIT);
+      past = trimHistory([...past, base]);
       future = [];
       set({ canUndo: true, canRedo: false });
       scheduleSave();
@@ -639,7 +701,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       const next = future[0];
       if (!doc || !next) return;
       future = future.slice(1);
-      past = [...past, snapshotOf(doc)];
+      past = trimHistory([...past, snapshotOf(doc)]);
       set((s) => ({
         doc: { ...doc, ...next },
         canUndo: true,
@@ -657,16 +719,28 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
  * 用于从回收站恢复或刚导入的画布：这些信息都由前端生成。
  */
 export async function reindexCanvas(canvasId: ID): Promise<CanvasMeta> {
-  const doc = fromJsonCanvas(await backend.loadCanvas(canvasId), canvasId);
+  const raw = await backend.loadCanvas(canvasId);
+  const doc = fromJsonCanvas(raw, canvasId);
   const { assets } = useAppStore.getState();
-  return backend.saveCanvas(canvasId, toJsonCanvas(doc, assets), indexOf(doc, assets), { added: 0, modified: 0, removed: 0 });
+  return backend.saveCanvas(canvasId, toJsonCanvas(doc, assets), indexOf(doc, assets), { added: 0, modified: 0, removed: 0 }, await contentHash(raw));
 }
 
 // 关掉的标签页不再保留
+bindOperationContext(() => {
+  const app = useAppStore.getState();
+  const canvasId = useCanvasStore.getState().doc?.canvasId;
+  return { workspace: app.workspace?.path, canvasId, active: app.view.kind === "canvas" && app.view.canvasId === canvasId, hasFolder: (id: string) => !!useCanvasStore.getState().doc?.elements.some((e) => e.id === id && e.type === "folder") };
+});
 useAppStore.subscribe((s, prev) => {
+  const currentId = s.view.kind === "canvas" ? s.view.canvasId : undefined;
+  const previousId = prev.view.kind === "canvas" ? prev.view.canvasId : undefined;
+  if (s.workspace?.path !== prev.workspace?.path || currentId !== previousId) invalidateOperations();
   if (s.tabs === prev.tabs) return;
   for (const id of cache.keys()) if (!s.tabs.includes(id)) cache.delete(id);
 });
 
 /** 退出前尽量把修改写盘 */
-window.addEventListener("beforeunload", () => void useCanvasStore.getState().flush());
+window.addEventListener("beforeunload", (event) => {
+  commitEditors();
+  if (dirty) { event.preventDefault(); event.returnValue = ""; }
+});

@@ -14,6 +14,7 @@ import type {
   WorkspaceInfo,
 } from "@/types/model";
 import { t } from "@/i18n";
+import { uuidv7 } from "@/lib/id";
 import type { Backend, ClipboardContent } from "./backend";
 import { reportImportProgress, type ImportProgressEvent } from "./importProgress";
 
@@ -42,6 +43,8 @@ export function createTauriBackend(): Backend {
     async pickWorkspace() {
       const dir = await open({ directory: true, title: t("选择或新建一个文件夹作为栖页工作区") });
       if (typeof dir !== "string") return null;
+      const { useCanvasStore } = await import("@/store/canvasStore");
+      await useCanvasStore.getState().flush();
       return remember(await invoke<WorkspaceInfo>("open_workspace", { path: dir }));
     },
 
@@ -54,21 +57,35 @@ export function createTauriBackend(): Backend {
     updateCanvas: (id, patch) => invoke<CanvasMeta>("update_canvas", { id, patch }),
     deleteCanvas: (id) => invoke<void>("delete_canvas", { id }),
     loadCanvas: (id) => invoke<string>("load_canvas", { id }),
-    saveCanvas: (id, content, index, changes) => invoke<CanvasMeta>("save_canvas", { id, content, index, changes }),
+    saveCanvas: (id, content, index, changes, expectedHash) => invoke<CanvasMeta>("save_canvas", { id, content, index, changes, expectedHash }),
+    saveRecovery: (id, content) => invoke<void>("save_recovery", { id, content }),
 
     importPaths: (paths, task) => invoke<Asset[]>("import_paths", { paths, task }),
     importTree: (paths, task) => invoke<ImportNode[]>("import_tree", { paths, task }),
     async importBlobs(files, task) {
+      const workspace = root;
       const out: Asset[] = [];
       for (const [i, f] of files.entries()) {
         const name = f.name || t("粘贴的图片.png");
         if (task) reportImportProgress({ task, current: name, doneFiles: i, totalFiles: files.length, fraction: i / files.length });
-        const bytes = new Uint8Array(await f.arrayBuffer());
-        out.push(await invoke<Asset>("import_bytes", { name, bytes: Array.from(bytes) }));
+        const token = uuidv7();
+        for (let offset = 0; offset < Math.max(1, f.size); offset += 256 * 1024) {
+          if (root !== workspace) throw new Error(t("操作已取消"));
+          const bytes = new Uint8Array(await f.slice(offset, offset + 256 * 1024).arrayBuffer());
+          const done = offset + bytes.length >= f.size;
+          const asset = await invoke<Asset | null>("import_blob_chunk", { root: workspace, token, name, offset, bytes: Array.from(bytes), done });
+          if (asset) out.push(asset);
+        }
       }
       return out;
     },
     listAssets: () => invoke<Asset[]>("list_assets"),
+    async thumbnailAsset(asset) {
+      const workspace = root;
+      const path = await invoke<string>("thumbnail_asset", { id: asset.id });
+      if (workspace !== root) throw new Error(t("操作已取消"));
+      return convertFileSrc(toWindowsPath(workspace, path));
+    },
     // 带上内容指纹：文件被外部程序改过后地址随之变化，WebView 不会继续显示缓存的旧图片
     assetUrl: (asset) => `${convertFileSrc(toWindowsPath(root, asset.path))}?v=${asset.hash.slice(0, 12)}`,
     assetPath: (asset) => toWindowsPath(root, asset.path),
@@ -122,16 +139,21 @@ export function createTauriBackend(): Backend {
     workspaceFileUrl: (path) => convertFileSrc(toWindowsPath(root, path)),
 
     async exportCanvas(canvas) {
+      const workspace = root;
       const dest = await save({
         title: t("导出画布"),
         defaultPath: `${canvas.title.replace(/[<>:"/\\|?*]/g, "_")}.zip`,
         filters: [{ name: t("画布包"), extensions: ["zip"] }],
       });
       if (!dest) return false;
+      if (workspace !== root) throw new Error(t("操作已取消"));
+      const { useCanvasStore } = await import("@/store/canvasStore");
+      await useCanvasStore.getState().flush();
       await invoke<void>("export_canvas", { id: canvas.id, dest });
       return true;
     },
     async importCanvases(projectId) {
+      const workspace = root;
       const picked = await open({
         title: t("导入画布"),
         multiple: true,
@@ -139,6 +161,7 @@ export function createTauriBackend(): Backend {
       });
       const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
       if (paths.length === 0) return [];
+      if (workspace !== root) throw new Error(t("操作已取消"));
       return invoke<CanvasMeta[]>("import_canvases", { projectId, paths });
     },
 
@@ -148,6 +171,6 @@ export function createTauriBackend(): Backend {
     emptyTrash: () => invoke<void>("empty_trash"),
 
     calendarDays: (from, to) => invoke<CanvasDay[]>("calendar_days", { from, to }),
-    search: (query) => invoke<SearchHit[]>("search", { query }),
+    search: (query, offset = 0) => invoke<SearchHit[]>("search", { query, offset }),
   };
 }

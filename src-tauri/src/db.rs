@@ -8,7 +8,8 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// 每个版本一段迁移脚本，按顺序执行；版本号记录在 PRAGMA user_version
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE projects (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -77,15 +78,18 @@ CREATE TABLE canvas_days (
     PRIMARY KEY (canvas_id, date)
 );
 CREATE INDEX canvas_days_date ON canvas_days(date);
-"#, r#"
+"#,
+    r#"
 -- 图片中识别出的文字；NULL 表示尚未识别，空串表示识别过但没有文字
 ALTER TABLE assets ADD COLUMN ocr_text TEXT;
 -- 画布缩略图数据（前端生成的精简布局 JSON）
 ALTER TABLE canvases ADD COLUMN preview TEXT;
-"#, r#"
+"#,
+    r#"
 -- 项目图标（图标名），为空时显示圆点
 ALTER TABLE projects ADD COLUMN icon TEXT;
-"#, r#"
+"#,
+    r#"
 -- 回收站里的文件：删除时从 assets 移到这里，恢复时再移回去
 CREATE TABLE trashed_assets (
     id            TEXT PRIMARY KEY,
@@ -101,11 +105,46 @@ CREATE TABLE trashed_assets (
     trash_file    TEXT NOT NULL,            -- 回收站中的文件，相对工作区根目录
     deleted_at    INTEGER NOT NULL
 );
-"#, r#"
+"#,
+    r#"
 -- 文件最后一次登记时的修改时间（毫秒）；用来发现文件被外部程序改过，见 commands::check_asset_changes。
 -- 为 NULL 时（升级前导入的）首次检查只记下当前时间
 ALTER TABLE assets ADD COLUMN modified_at INTEGER;
-"#];
+"#,
+    r#"
+ALTER TABLE assets ADD COLUMN ocr_retry_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE assets ADD COLUMN ocr_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE assets ADD COLUMN trash_snapshot INTEGER NOT NULL DEFAULT 0;
+UPDATE assets SET ocr_text=NULL WHERE mime LIKE 'image/%' AND ocr_text='';
+CREATE TABLE pending_files(path TEXT PRIMARY KEY);
+CREATE INDEX asset_refs_asset ON asset_refs(asset_id);
+CREATE VIRTUAL TABLE search_docs USING fts5(canvas_id UNINDEXED, element_id UNINDEXED, asset_id UNINDEXED, kind UNINDEXED, content, tokenize='trigram');
+INSERT INTO search_docs SELECT id, NULL, NULL, 'canvas', title FROM canvases;
+INSERT INTO search_docs SELECT canvas_id, element_id, NULL, 'text', text FROM element_text;
+INSERT INTO search_docs SELECT '', NULL, id, 'file', name FROM assets;
+INSERT INTO search_docs SELECT '', NULL, id, 'image', ocr_text FROM assets WHERE ocr_text IS NOT NULL;
+CREATE TRIGGER search_canvas_insert AFTER INSERT ON canvases BEGIN
+ INSERT INTO search_docs VALUES(new.id,NULL,NULL,'canvas',new.title); END;
+CREATE TRIGGER search_canvas_update AFTER UPDATE OF title ON canvases BEGIN
+ DELETE FROM search_docs WHERE canvas_id=old.id AND kind='canvas';
+ INSERT INTO search_docs VALUES(new.id,NULL,NULL,'canvas',new.title); END;
+CREATE TRIGGER search_canvas_delete AFTER DELETE ON canvases BEGIN
+ DELETE FROM search_docs WHERE canvas_id=old.id; END;
+CREATE TRIGGER search_text_insert AFTER INSERT ON element_text BEGIN
+ INSERT INTO search_docs VALUES(new.canvas_id,new.element_id,NULL,'text',new.text); END;
+CREATE TRIGGER search_text_delete AFTER DELETE ON element_text BEGIN
+ DELETE FROM search_docs WHERE canvas_id=old.canvas_id AND element_id=old.element_id AND kind='text'; END;
+CREATE TRIGGER search_asset_insert AFTER INSERT ON assets BEGIN
+ INSERT INTO search_docs VALUES('',NULL,new.id,'file',new.name);
+ INSERT INTO search_docs VALUES('',NULL,new.id,'image',new.ocr_text); END;
+CREATE TRIGGER search_asset_update AFTER UPDATE OF name,ocr_text ON assets BEGIN
+ DELETE FROM search_docs WHERE asset_id=old.id;
+ INSERT INTO search_docs VALUES('',NULL,new.id,'file',new.name);
+ INSERT INTO search_docs VALUES('',NULL,new.id,'image',new.ocr_text); END;
+CREATE TRIGGER search_asset_delete AFTER DELETE ON assets BEGIN
+ DELETE FROM search_docs WHERE asset_id=old.id; END;
+"#,
+];
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;

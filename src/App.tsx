@@ -25,6 +25,7 @@ import { inboxOf, useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
 import { commandForEvent, shortcutOf, useSettings } from "@/store/settingsStore";
 import type { CommandId } from "@/lib/shortcuts";
+import { modalOpen } from "@/lib/operations";
 
 /** 资源库页面不用全局搜索，改为聚焦资源库自己的搜索框 */
 function focusAssetSearch() {
@@ -117,6 +118,7 @@ function useDesktopSync() {
 
 export function App() {
   const status = useAppStore((s) => s.status);
+  const workspacePath = useAppStore((s) => s.workspace?.path);
   const view = useAppStore((s) => s.view);
   const searchOpen = useAppStore((s) => s.searchOpen);
   const toast = useAppStore((s) => s.toast);
@@ -138,7 +140,7 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const s = useAppStore.getState();
-      if (s.status !== "ready" || useSettings.getState().capturing) return;
+      if (s.status !== "ready" || useSettings.getState().capturing || modalOpen() || e.isComposing) return;
       // Ctrl+F：画布页由 CanvasView 打开画布内查找，资源库聚焦自己的搜索框，其他页面打开全局搜索
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyF") {
         e.preventDefault();
@@ -162,7 +164,7 @@ export function App() {
       {status === "no-workspace" ? (
         <WelcomeScreen />
       ) : (
-        <div className="shell" style={{ gridTemplateColumns: `${sidebarWidth}px minmax(0, 1fr)` }}>
+        <div className="shell" key={workspacePath} style={{ gridTemplateColumns: `${sidebarWidth}px minmax(0, 1fr)` }}>
           <Sidebar />
           <main className="main">
             <TabBar />

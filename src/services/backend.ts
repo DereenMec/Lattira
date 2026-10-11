@@ -60,7 +60,8 @@ export interface Backend {
   deleteCanvas(id: ID): Promise<void>;
   /** 返回画布文件的原始内容（JSON Canvas） */
   loadCanvas(id: ID): Promise<string>;
-  saveCanvas(id: ID, content: string, index: CanvasIndex, changes: ChangeSummary): Promise<CanvasMeta>;
+  saveCanvas(id: ID, content: string, index: CanvasIndex | null, changes: ChangeSummary, expectedHash?: string): Promise<CanvasMeta>;
+  saveRecovery(id: ID, content: string): Promise<void>;
 
   /**
    * 导入文件。task 为 importProgress 里的任务 id，给出时上报进度。
@@ -73,6 +74,7 @@ export interface Backend {
   importBlobs(files: File[], task?: string): Promise<Asset[]>;
   listAssets(): Promise<Asset[]>;
   assetUrl(asset: Asset): string;
+  thumbnailAsset(asset: Asset): Promise<string>;
   /** 用系统默认程序打开文件 */
   openAsset(asset: Asset): Promise<void>;
   /**
@@ -134,7 +136,7 @@ export interface Backend {
 
   /** 日历：返回 [from, to] 区间内每个画布被编辑过的日期 */
   calendarDays(from: LocalDate, to: LocalDate): Promise<CanvasDay[]>;
-  search(query: string): Promise<SearchHit[]>;
+  search(query: string, offset?: number): Promise<SearchHit[]>;
 }
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;

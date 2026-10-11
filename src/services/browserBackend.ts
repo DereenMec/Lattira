@@ -5,18 +5,22 @@ import type { Asset, CanvasDay, CanvasMeta, ID, Project, SearchHit, TrashItem, W
 import { PROJECT_COLORS } from "@/types/model";
 import { nameKey, sameName, splitName, uniqueName } from "@/lib/names";
 import { reportImportProgress } from "./importProgress";
+import { loadFile, storeFile, removeFile } from "./browserFiles";
+import { contentHash } from "@/lib/operations";
+import { fromJsonCanvas } from "@/lib/jsonCanvas";
+import { sanitizeFileName, sanitizeName } from "@/lib/names";
 import type { Backend, CopyPayload } from "./backend";
 
 /**
  * 浏览器预览用的存储：数据存在 localStorage，仅用于开发界面。
- * 导入的文件只保存在内存里（blob URL），刷新页面后图片和文件内容会丢失。
+ * 元数据保存在 localStorage，文件本体保存在 IndexedDB。
  */
 interface State {
   workspace: WorkspaceInfo | null;
   projects: Project[];
   canvases: CanvasMeta[];
   days: CanvasDay[];
-  assets: Asset[];
+  assets: (Asset & { trashSnapshot?: boolean })[];
   texts: Record<ID, { elementId: ID; text: string }[]>;
   assetRefs: Record<ID, ID[]>;
   /** 回收站；早期保存的数据里没有这一项 */
@@ -46,13 +50,35 @@ export function createBrowserBackend(): Backend {
   const trash = (state.trash ??= { canvases: [], assets: [] });
   const blobUrls = new Map<ID, string>();
   let copied: CopyPayload | null = null;
+  const pendingContents = new Map<string, string | null>();
+  const setContent = (id: ID, content: string | null) => {
+    const key = contentKey(id);
+    if (!pendingContents.has(key)) pendingContents.set(key, localStorage.getItem(key));
+    if (content === null) localStorage.removeItem(key); else localStorage.setItem(key, content);
+  };
+  const rollback = () => {
+    for (const [key, content] of pendingContents) {
+      try { if (content === null) localStorage.removeItem(key); else localStorage.setItem(key, content); } catch { /* keep the draft in the caller on storage failure */ }
+    }
+    pendingContents.clear();
+    const previous = load();
+    Object.assign(trash, previous.trash ?? { canvases: [], assets: [] });
+    Object.assign(state, previous, { trash });
+  };
 
   const persist = () => {
     try {
       localStorage.setItem(KEY, JSON.stringify(state));
-    } catch {
-      // 配额不足时静默失败：预览模式不保证持久化
+      pendingContents.clear();
+    } catch (error) {
+      rollback();
+      throw error;
     }
+  };
+  const ensureBlob = async (id: ID) => {
+    if (blobUrls.has(id)) return;
+    const blob = await loadFile(id);
+    if (blob) blobUrls.set(id, URL.createObjectURL(blob));
   };
 
   const findCanvas = (id: ID) => {
@@ -61,18 +87,27 @@ export function createBrowserBackend(): Backend {
     return c;
   };
 
-  const withRefCounts = () => state.assets.map(withRefs);
+  const withRefCounts = () => state.assets.filter((a) => !a.trashSnapshot).map(withRefs);
   function withRefs(a: Asset): Asset {
     const canvasIds = Object.entries(state.assetRefs)
       .filter(([, ids]) => ids.includes(a.id))
       .map(([c]) => c);
-    return { ...a, refCount: canvasIds.length, canvasIds };
+    return { ...a, refCount: canvasIds.length, canvasIds: canvasIds.filter((id) => state.canvases.some((c) => c.id === id)) };
   }
 
   // 与桌面端相同的命名规则（见 src-tauri/src/commands.rs）：项目名在工作区里唯一，画布名在项目里唯一
   const projectTaken = (name: string, exclude?: ID) => state.projects.some((p) => p.id !== exclude && sameName(p.name, name));
   const canvasTitles = (projectId: ID, exclude?: ID) =>
     new Set(state.canvases.filter((c) => c.projectId === projectId && c.id !== exclude).map((c) => nameKey(c.title)));
+
+  function indexDocument(id: ID, raw: string) {
+    const doc = fromJsonCanvas(raw, id);
+    state.assetRefs[id] = [...new Set(doc.elements.flatMap((el) => "assetId" in el ? [el.assetId] : []))];
+    state.texts[id] = doc.elements.flatMap((el) => {
+      const text = el.type === "text" ? el.text : el.type === "folder" ? el.label : el.type === "link" ? [el.title, el.url, el.siteName, el.description].filter(Boolean).join("\n") : "";
+      return text ? [{ elementId: el.id, text }] : [];
+    });
+  }
 
   async function sha256(buf: ArrayBuffer) {
     const digest = await crypto.subtle.digest("SHA-256", buf);
@@ -88,7 +123,7 @@ export function createBrowserBackend(): Backend {
     });
   }
 
-  return {
+  const implementation: Backend = {
     kind: "browser",
 
     async restoreWorkspace() {
@@ -117,6 +152,7 @@ export function createBrowserBackend(): Backend {
       return [...state.projects];
     },
     async createProject(name, color) {
+      name = sanitizeName(name);
       if (projectTaken(name)) throw new Error(t("已经有名为「{name}」的项目", { name }));
       const now = Date.now();
       const p: Project = { id: uuidv7(), name, color, isInbox: false, pinned: false, archived: false, createdAt: now, updatedAt: now };
@@ -125,6 +161,7 @@ export function createBrowserBackend(): Backend {
       return { ...p };
     },
     async updateProject(id, patch) {
+      if (patch.name) patch = { ...patch, name: sanitizeName(patch.name) };
       const p = state.projects.find((p) => p.id === id);
       if (!p) throw new Error(t("项目不存在：{id}", { id }));
       if (patch.name && projectTaken(patch.name, id)) throw new Error(t("已经有名为「{name}」的项目", { name: patch.name }));
@@ -141,7 +178,7 @@ export function createBrowserBackend(): Backend {
       const c: CanvasMeta = {
         id: uuidv7(),
         projectId,
-        title: uniqueName(title.trim() || t("未命名画布"), canvasTitles(projectId)),
+        title: uniqueName(sanitizeName(title.trim() || t("未命名画布")), canvasTitles(projectId)),
         elementCount: 0,
         createdAt: now,
         updatedAt: now,
@@ -153,7 +190,7 @@ export function createBrowserBackend(): Backend {
     async updateCanvas(id, patch) {
       const c = findCanvas(id);
       const projectId = patch.projectId ?? c.projectId;
-      const title = patch.title?.trim();
+      const title = patch.title ? sanitizeName(patch.title) : undefined;
       if (title && title !== c.title) {
         if (canvasTitles(projectId, id).has(nameKey(title))) throw new Error(t("项目里已经有名为「{name}」的画布", { name: title }));
         c.title = title;
@@ -167,24 +204,58 @@ export function createBrowserBackend(): Backend {
     /** 移到回收站：画布内容和日历记录保留，恢复时原样放回 */
     async deleteCanvas(id) {
       const c = findCanvas(id);
+      const raw = localStorage.getItem(contentKey(id));
+      if (raw) {
+        const doc = JSON.parse(raw);
+        const copies = new Map<ID, Asset>();
+        for (const node of doc.nodes ?? []) {
+          const assetId = node.lattira?.assetId;
+          if (!assetId) continue;
+          if (!copies.has(assetId)) {
+            const original = state.assets.find((a) => a.id === assetId);
+            const blob = await loadFile(assetId);
+            if (!original || !blob) throw new Error(t("找不到这个文件"));
+            const copyId = uuidv7();
+            const copy = { ...original, id: copyId, hash: `${original.hash.split(":")[0]}:${copyId}`, trashSnapshot: true };
+            await storeFile(copyId, blob);
+            state.assets.push(copy); copies.set(assetId, copy);
+          }
+          node.lattira.assetId = copies.get(assetId)!.id;
+        }
+        state.assetRefs[id] = [...copies.values()].map((a) => a.id);
+        setContent(id, JSON.stringify(doc, null, 2));
+      }
       state.canvases = state.canvases.filter((x) => x.id !== id);
       trash.canvases.push({ ...c, deletedAt: Date.now() });
       delete state.texts[id];
-      delete state.assetRefs[id];
       persist();
     },
     async loadCanvas(id) {
       findCanvas(id);
       return localStorage.getItem(contentKey(id)) ?? "";
     },
-    async saveCanvas(id, content, index, changes) {
+    async saveRecovery(id, content) {
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+      link.download = `${findCanvas(id).title}.recovery.canvas`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    },
+    async saveCanvas(id, content, index, changes, expectedHash) {
       const c = findCanvas(id);
       const now = Date.now();
-      localStorage.setItem(contentKey(id), content);
-      c.elementCount = index.elementCount;
-      c.preview = index.preview;
-      state.texts[id] = index.texts;
-      state.assetRefs[id] = index.assetIds;
+      const previous = localStorage.getItem(contentKey(id));
+      if (expectedHash && await contentHash(previous ?? "") !== expectedHash) {
+        await storeFile(`conflict:${id}:${now}`, new Blob([content]));
+        throw new Error(t("画布已被其他页面修改，本地内容已保存到恢复副本"));
+      }
+      setContent(id, content);
+      if (index) {
+        c.elementCount = index.elementCount;
+        c.preview = index.preview;
+        state.texts[id] = index.texts;
+        state.assetRefs[id] = index.assetIds;
+      }
       const count = changes.added + changes.modified + changes.removed;
       if (count > 0) {
         c.updatedAt = now;
@@ -211,7 +282,7 @@ export function createBrowserBackend(): Backend {
         const hash = await sha256(buf);
         let asset = state.assets.find((a) => a.hash === hash);
         if (!asset) {
-          const name = f.name || t("粘贴的图片.png");
+          const name = sanitizeFileName(f.name || t("粘贴的图片.png"));
           asset = {
             id: uuidv7(),
             hash,
@@ -225,22 +296,27 @@ export function createBrowserBackend(): Backend {
           };
           state.assets.push(asset);
         }
+        await storeFile(asset.id, f);
         if (!blobUrls.has(asset.id)) blobUrls.set(asset.id, URL.createObjectURL(f));
         if (asset.mime.startsWith("image/") && asset.width === undefined) {
           Object.assign(asset, await imageSize(blobUrls.get(asset.id)!));
         }
         out.push(withRefs(asset));
+        persist();
       }
       persist();
       return out;
     },
     async listAssets() {
+      await Promise.all(state.assets.map((a) => ensureBlob(a.id)));
       return withRefCounts();
     },
     assetUrl(asset) {
       return blobUrls.get(asset.id) ?? "";
     },
+    async thumbnailAsset(asset) { await ensureBlob(asset.id); return blobUrls.get(asset.id) ?? ""; },
     async openAsset(asset) {
+      await ensureBlob(asset.id);
       const url = blobUrls.get(asset.id);
       if (url) window.open(url, "_blank");
     },
@@ -265,11 +341,12 @@ export function createBrowserBackend(): Backend {
       if (!a) throw new Error(t("资源不存在：{id}", { id: asset.id }));
       const trimmed = name.trim();
       const ext = a.name.includes(".") ? a.name.slice(a.name.lastIndexOf(".")) : "";
-      a.name = trimmed.includes(".") ? trimmed : trimmed + ext;
+      a.name = sanitizeFileName(trimmed.includes(".") ? trimmed : trimmed + ext);
       persist();
       return { ...a, refCount: asset.refCount };
     },
     async saveAssetCopy(asset) {
+      await ensureBlob(asset.id);
       const url = blobUrls.get(asset.id);
       if (!url) return false;
       const a = document.createElement("a");
@@ -283,6 +360,7 @@ export function createBrowserBackend(): Backend {
       const canvasIds: ID[] = [];
       let removedCards = 0;
       for (const [canvasId, refs] of Object.entries(state.assetRefs)) {
+        if (!state.canvases.some((c) => c.id === canvasId)) continue;
         if (!refs.some((id) => gone.has(id))) continue;
         const raw = localStorage.getItem(contentKey(canvasId));
         if (raw) {
@@ -290,7 +368,7 @@ export function createBrowserBackend(): Backend {
           const removed = new Set(doc.nodes.filter((n) => n.lattira?.assetId && gone.has(n.lattira.assetId)).map((n) => n.id));
           doc.nodes = doc.nodes.filter((n) => !removed.has(n.id));
           doc.edges = doc.edges.filter((e) => !removed.has(e.fromNode) && !removed.has(e.toNode));
-          localStorage.setItem(contentKey(canvasId), JSON.stringify(doc, null, 2));
+          setContent(canvasId, JSON.stringify(doc, null, 2));
           removedCards += removed.size;
           const c = state.canvases.find((x) => x.id === canvasId);
           if (c) c.elementCount = doc.nodes.length;
@@ -312,7 +390,7 @@ export function createBrowserBackend(): Backend {
     async readClipboard() {
       return { cards: copied?.cards ?? null, files: [], text: null };
     },
-    // 浏览器预览里的文件只存在内存中，不会被外部程序修改
+    // 浏览器预览里的文件保存在 IndexedDB，不会被外部程序修改
     async checkAssetChanges() {
       return [];
     },
@@ -326,6 +404,8 @@ export function createBrowserBackend(): Backend {
       state.assets.push(copy);
       const url = blobUrls.get(id);
       if (url) blobUrls.set(copyId, url);
+      const blob = await loadFile(id);
+      if (blob) await storeFile(copyId, blob);
       persist();
       return withRefs(copy);
     },
@@ -333,7 +413,7 @@ export function createBrowserBackend(): Backend {
       const asset = state.assets.find((a) => a.id === id);
       if (!asset) throw new Error(t("找不到这个文件"));
       const [, oldExt] = splitName(asset.name, true);
-      const fileName = splitName(name, true)[1] ? name : `${name}${oldExt}`;
+      const fileName = sanitizeFileName(splitName(name, true)[1] ? name : `${name}${oldExt}`);
       const copyId = uuidv7();
       const copy: Asset = {
         ...asset,
@@ -346,6 +426,8 @@ export function createBrowserBackend(): Backend {
       state.assets.push(copy);
       const url = blobUrls.get(id);
       if (url) blobUrls.set(copyId, url);
+      const blob = await loadFile(id);
+      if (blob) await storeFile(copyId, blob);
       persist();
       return withRefs(copy);
     },
@@ -354,7 +436,7 @@ export function createBrowserBackend(): Backend {
       return [{ ext: ".txt", name: t("文本文档") }];
     },
     async createNewFile(ext, name) {
-      const fileName = name.toLowerCase().endsWith(ext) ? name : `${name}${ext}`;
+      const fileName = sanitizeFileName(name.toLowerCase().endsWith(ext) ? name : `${name}${ext}`);
       const id = uuidv7();
       const asset: Asset = {
         id,
@@ -369,7 +451,9 @@ export function createBrowserBackend(): Backend {
         canvasIds: [],
       };
       state.assets.push(asset);
-      blobUrls.set(id, URL.createObjectURL(new Blob([], { type: asset.mime })));
+      const blob = new Blob([], { type: asset.mime });
+      await storeFile(id, blob);
+      blobUrls.set(id, URL.createObjectURL(blob));
       persist();
       return { ...asset };
     },
@@ -410,7 +494,12 @@ export function createBrowserBackend(): Backend {
       });
       const out: CanvasMeta[] = [];
       for (const f of files) {
-        const doc = JSON.parse(await f.text()) as { nodes?: Record<string, unknown>[]; edges?: unknown[] };
+        const doc = JSON.parse((await f.text()).replace(/^\uFEFF/, "")) as { nodes?: Record<string, unknown>[]; edges?: unknown[] };
+        if (!doc || typeof doc !== "object" || (doc.nodes !== undefined && !Array.isArray(doc.nodes)) || (doc.edges !== undefined && !Array.isArray(doc.edges))) throw new Error(t("无效的 JSON Canvas 文件"));
+        for (const n of doc.nodes ?? []) {
+          n.id ??= uuidv7(); n.x ??= 0; n.y ??= 0; n.width ??= 250; n.height ??= 60;
+        }
+        fromJsonCanvas(JSON.stringify({ ...doc, nodes: doc.nodes ?? [], edges: doc.edges ?? [] }), "validation");
         // 引用的文件不在本工作区时，变成写着原路径的文本卡片
         for (const n of doc.nodes ?? []) {
           const lattira = n.lattira as { assetId?: ID; parent?: ID } | undefined;
@@ -424,14 +513,17 @@ export function createBrowserBackend(): Backend {
         const c: CanvasMeta = {
           id: uuidv7(),
           projectId,
-          title: f.name.replace(/\.canvas$/i, "") || t("导入的画布"),
+          title: uniqueName(sanitizeName(f.name.replace(/\.canvas$/i, "") || t("导入的画布")), canvasTitles(projectId)),
           elementCount: doc.nodes?.length ?? 0,
           createdAt: now,
           updatedAt: now,
         };
-        localStorage.setItem(contentKey(c.id), JSON.stringify({ nodes: doc.nodes ?? [], edges: doc.edges ?? [] }, null, 2));
+        const content = JSON.stringify({ ...doc, nodes: doc.nodes ?? [], edges: doc.edges ?? [] }, null, 2);
+        setContent(c.id, content);
+        indexDocument(c.id, content);
         state.canvases.push(c);
         out.push({ ...c });
+        persist();
       }
       persist();
       return out;
@@ -465,7 +557,14 @@ export function createBrowserBackend(): Backend {
           // 原项目已归档时放进「未分类」
           const project = state.projects.find((p) => p.id === meta.projectId);
           if (!project || project.archived) meta.projectId = state.projects.find((p) => p.isInbox)!.id;
+          meta.title = uniqueName(meta.title, canvasTitles(meta.projectId));
           state.canvases.push(meta);
+          const raw = localStorage.getItem(contentKey(meta.id));
+          if (raw) indexDocument(meta.id, raw);
+          for (const id of state.assetRefs[meta.id] ?? []) {
+            const asset = state.assets.find((a) => a.id === id);
+            if (asset?.trashSnapshot) { asset.trashSnapshot = false; assets.push(withRefs(asset)); }
+          }
           canvases.push({ ...meta });
         } else {
           const a = trash.assets.find((x) => x.id === item.id);
@@ -473,29 +572,36 @@ export function createBrowserBackend(): Backend {
           trash.assets = trash.assets.filter((x) => x.id !== item.id);
           const { deletedAt: _, ...asset } = a;
           const existing = state.assets.find((x) => x.hash === asset.hash);
-          if (!existing) state.assets.push(asset);
-          assets.push({ ...(existing ?? asset), refCount: 0 });
+          if (existing) asset.hash = `${asset.hash}:${asset.id}`;
+          state.assets.push(asset);
+          assets.push(withRefs(asset));
         }
       }
       persist();
       return { canvases, assets };
     },
     async purgeTrash(items) {
+      const remove: ID[] = [];
       for (const item of items) {
         if (item.kind === "canvas") {
           if (!trash.canvases.some((c) => c.id === item.id)) continue;
           trash.canvases = trash.canvases.filter((c) => c.id !== item.id);
           state.days = state.days.filter((d) => d.canvasId !== item.id);
-          localStorage.removeItem(contentKey(item.id));
+          delete state.assetRefs[item.id]; delete state.texts[item.id];
+          setContent(item.id, null);
+          for (const asset of state.assets) if (asset.trashSnapshot && !Object.values(state.assetRefs).some((ids) => ids.includes(asset.id))) remove.push(asset.id);
+          state.assets = state.assets.filter((a) => !remove.includes(a.id));
         } else {
           trash.assets = trash.assets.filter((a) => a.id !== item.id);
           blobUrls.delete(item.id);
+          remove.push(item.id);
         }
       }
       persist();
+      await Promise.all(remove.map((id) => removeFile(id).catch(console.warn)));
     },
     async emptyTrash() {
-      await this.purgeTrash([
+      await implementation.purgeTrash([
         ...trash.canvases.map((c) => ({ kind: "canvas" as const, id: c.id })),
         ...trash.assets.map((a) => ({ kind: "asset" as const, id: a.id })),
       ]);
@@ -505,7 +611,7 @@ export function createBrowserBackend(): Backend {
       const alive = new Set(state.canvases.map((c) => c.id));
       return state.days.filter((d) => d.date >= from && d.date <= to && alive.has(d.canvasId));
     },
-    async search(query) {
+    async search(query, offset = 0) {
       const q = query.trim().toLowerCase();
       if (!q) return [];
       const hits: SearchHit[] = [];
@@ -521,11 +627,25 @@ export function createBrowserBackend(): Backend {
         for (const assetId of state.assetRefs[c.id] ?? []) {
           const a = state.assets.find((a) => a.id === assetId);
           if (a?.name.toLowerCase().includes(q)) {
-            hits.push({ kind: "file", canvasId: c.id, canvasTitle: c.title, projectId: c.projectId, snippet: a.name });
+            hits.push({ kind: "file", canvasId: c.id, canvasTitle: c.title, projectId: c.projectId, assetId, snippet: a.name });
           }
         }
       }
-      return hits.slice(0, 50);
+      return hits.slice(offset, offset + 51);
     },
   };
+  // Serialize browser mutations so a pending file import cannot be persisted by another save.
+  const mutations = new Set(["pickWorkspace", "createProject", "updateProject", "createCanvas", "updateCanvas", "deleteCanvas", "saveCanvas", "importBlobs", "renameAsset", "deleteAssets", "forkAssetForCanvas", "copyAssetAs", "createNewFile", "importCanvases", "restoreTrash", "purgeTrash", "emptyTrash"]);
+  let tail: Promise<unknown> = Promise.resolve();
+  return new Proxy(implementation, {
+    get(target, property, receiver) {
+      const method = Reflect.get(target, property, receiver);
+      if (typeof property !== "string" || !mutations.has(property)) return method;
+      return (...args: unknown[]) => {
+        const operation = tail.then(() => method.apply(implementation, args)).catch((error: unknown) => { rollback(); throw error; });
+        tail = operation.catch(() => {});
+        return operation;
+      };
+    },
+  });
 }

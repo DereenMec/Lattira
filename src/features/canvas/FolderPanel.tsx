@@ -21,6 +21,8 @@ import { useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasElement, ID } from "@/types/model";
 import { copySelection, cutSelection, duplicateCards, pasteIntoCanvas } from "./clipboard";
 import { Highlight } from "@/features/search/Highlight";
+import { useVirtualRows } from "@/lib/useVirtualRows";
+import { AssetImage } from "@/features/assets/AssetImage";
 import { FolderGlyph } from "./FolderGlyph";
 import { hostOf, openLink, promptLink } from "./links";
 import { moveIntoFolderNamed, moveToCanvasNamed, newFolderLabel } from "./cardNames";
@@ -147,6 +149,12 @@ export function FolderPanel(props: Props) {
     setFlashIds(new Set(focusIds));
     // 粘贴进来的排在最后，滚到最后一个
     const last = focusIds[focusIds.length - 1];
+    const grid = gridRef.current;
+    if (grid) {
+      const columns = Math.max(1, Math.floor((grid.clientWidth - 24 + 6) / 118));
+      const index = items.findIndex((el) => el.id === last);
+      if (index >= 0) grid.scrollTop = Math.floor(index / columns) * 146;
+    }
     requestAnimationFrame(() =>
       gridRef.current?.querySelector(`[data-fp-item="${last}"]`)?.scrollIntoView({ block: "nearest" }),
     );
@@ -330,6 +338,7 @@ export function FolderPanel(props: Props) {
   };
 
   const onKeyDown = (e: ReactKeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     const single = shownSelected.length === 1 ? byId.get(shownSelected[0]) : undefined;
@@ -352,6 +361,7 @@ export function FolderPanel(props: Props) {
     }
   };
 
+  const virtualRows = useVirtualRows(gridRef, items.length, 146, 112, 6);
   const style = frame ? { left: frame.left, top: frame.top, width: frame.width, height: frame.height, right: "auto" } : undefined;
 
   return (
@@ -416,7 +426,9 @@ export function FolderPanel(props: Props) {
             <p className="hint">{t("把画布上的卡片拖到这里，就能放进这个文件夹")}</p>
           </div>
         ) : (
-          items.map((el) => (
+          <>
+          {virtualRows.top > 0 && <div aria-hidden style={{ gridColumn: "1 / -1", height: virtualRows.top - 6 }} />}
+          {items.slice(virtualRows.start, virtualRows.end).map((el) => (
             <div
               key={el.id}
               className={[
@@ -451,7 +463,9 @@ export function FolderPanel(props: Props) {
                 <div className="fp-sub">{counts.get(el.id) ? t("{n} 项", { n: counts.get(el.id)! }) : t("空文件夹")}</div>
               )}
             </div>
-          ))
+          ))}
+          {virtualRows.bottom > 0 && <div aria-hidden style={{ gridColumn: "1 / -1", height: virtualRows.bottom - 6 }} />}
+          </>
         )}
       </div>
 
@@ -477,7 +491,7 @@ function ItemThumb({ el, asset, query }: { el: CanvasElement; asset?: Asset; que
       return <FolderGlyph size={52} />;
     case "image": {
       const url = asset ? backend.assetUrl(asset) : "";
-      return url ? <img src={url} alt="" draggable={false} loading="lazy" decoding="async" /> : <img className="fp-file-icon" src={fileIconUrl("")} alt="" draggable={false} />;
+      return url && asset ? <AssetImage asset={asset} /> : <img className="fp-file-icon" src={fileIconUrl("")} alt="" draggable={false} />;
     }
     case "file":
       return <img className="fp-file-icon" src={fileIconUrl(asset?.name ?? "")} alt="" draggable={false} />;

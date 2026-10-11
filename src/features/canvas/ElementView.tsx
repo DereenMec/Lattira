@@ -8,6 +8,8 @@ import type { Asset, CanvasElement, ID, LinkElement } from "@/types/model";
 import { Highlight } from "@/features/search/Highlight";
 import { FolderGlyph } from "./FolderGlyph";
 import { hostOf, useLinkFetching } from "./links";
+import { registerEditor } from "@/lib/operations";
+import { AssetImage } from "@/features/assets/AssetImage";
 
 export interface ElementHandlers {
   onPointerDown(e: ReactPointerEvent, id: ID): void;
@@ -77,7 +79,7 @@ function ElementViewImpl({
   return (
     <div
       className={className}
-      style={{ transform: `translate(${el.x}px, ${el.y}px)`, width: el.width, height: el.height }}
+      style={{ transform: `translate(${el.x}px, ${el.y}px)`, width: el.width, height: el.height, background: !el.color && el.sourceColor?.startsWith("#") ? el.sourceColor : undefined }}
       data-element-id={el.id}
       onPointerDown={(e) => handlers.onPointerDown(e, el.id)}
       onDoubleClick={() => handlers.onDoubleClick(el.id)}
@@ -97,8 +99,8 @@ function ElementViewImpl({
         ))}
 
       {el.type === "image" &&
-        (assetUrl ? (
-          <img className="el-image-body" src={assetUrl} alt={asset?.name ?? ""} draggable={false} decoding="async" />
+        (lod ? <div className="el-text-lod">{asset?.name ?? t("图片不可用")}</div> : assetUrl ? (
+          asset ? <AssetImage className="el-image-body" asset={asset} alt={asset.name} /> : null
         ) : (
           <div className="el-missing">
             <ImageOff size={20} />
@@ -213,6 +215,11 @@ function TextEditor({ initial, multiline, onDone }: { initial: string; multiline
   const [value, setValue] = useState(initial);
   const ref = useRef<HTMLTextAreaElement & HTMLInputElement>(null);
   const done = useRef(false);
+  const draft = useRef(value);
+  draft.current = value;
+  useEffect(() => registerEditor(() => {
+    if (!done.current) { done.current = true; onDone(draft.current); }
+  }), [onDone]);
 
   useEffect(() => {
     const node = ref.current;
@@ -236,6 +243,7 @@ function TextEditor({ initial, multiline, onDone }: { initial: string; multiline
     onPointerDown: (e: ReactPointerEvent) => e.stopPropagation(),
     onKeyDown: (e: ReactKeyboardEvent) => {
       e.stopPropagation();
+      if (e.nativeEvent.isComposing) return;
       if (e.key === "Escape" || (e.key === "Enter" && (!multiline || e.ctrlKey))) {
         e.preventDefault();
         finish();

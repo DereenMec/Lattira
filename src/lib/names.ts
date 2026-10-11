@@ -5,6 +5,18 @@
 
 export const nameKey = (name: string) => name.trim().toLowerCase();
 
+/** Match the desktop filename sanitizer before checking collisions. */
+export function sanitizeName(name: string): string {
+  let value = name.replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g, "_").trim().replace(/[. ]+$/, "");
+  value = Array.from(value).slice(0, 80).join("") || "未命名";
+  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(value)) value += "_";
+  return value;
+}
+export function sanitizeFileName(name: string): string {
+  const [stem, ext] = splitName(name.trim(), true);
+  return `${sanitizeName(stem)}${ext ? `.${sanitizeName(ext.slice(1))}` : ""}`;
+}
+
 export const sameName = (a: string, b: string) => nameKey(a) === nameKey(b);
 
 /** 文件名拆成主名和扩展名（含点）；文件夹、项目、画布没有扩展名 */

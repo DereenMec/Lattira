@@ -2,7 +2,9 @@ import { create } from "zustand";
 import { backend, type CanvasPatch, type ProjectPatch } from "@/services/backend";
 import { seedWelcomeCanvas } from "@/features/workspace/seed";
 import { t } from "@/i18n";
-import { sameName } from "@/lib/names";
+import { sameName, sanitizeName } from "@/lib/names";
+import { commitEditors, invalidateOperations } from "@/lib/operations";
+import { cancelPrompts } from "@/features/menu/PromptDialog";
 import type { Asset, CanvasMeta, ID, Project, WorkspaceInfo } from "@/types/model";
 import { PROJECT_COLORS } from "@/types/model";
 
@@ -62,12 +64,12 @@ const toMap = (assets: Asset[]) => new Map(assets.map((a) => [a.id, a]));
 
 /** 工作区里是否已有这个名字的项目（不区分大小写；归档的和「未分类」也算） */
 export function projectNameTaken(name: string, exclude?: ID): boolean {
-  return useAppStore.getState().projects.some((p) => p.id !== exclude && sameName(p.name, name));
+  return useAppStore.getState().projects.some((p) => p.id !== exclude && sameName(p.name, sanitizeName(name)));
 }
 
 /** 项目里是否已有这个名字的画布 */
 export function canvasTitleTaken(projectId: ID, title: string, exclude?: ID): boolean {
-  return useAppStore.getState().canvases.some((c) => c.projectId === projectId && c.id !== exclude && sameName(c.title, title));
+  return useAppStore.getState().canvases.some((c) => c.projectId === projectId && c.id !== exclude && sameName(c.title, sanitizeName(title)));
 }
 
 function readFlag(key: string, fallback: boolean): boolean {
@@ -120,6 +122,7 @@ export const inboxOf = (projects: Project[]) => projects.find((p) => p.isInbox);
 export const projectLabel = (p: Pick<Project, "isInbox" | "name">) => (p.isInbox ? t("未分类") : p.name);
 
 export const useAppStore = create<AppState>()((set, get) => {
+  let navigation = 0;
   async function enter(ws: WorkspaceInfo) {
     const [projects, canvases, assets] = await Promise.all([
       backend.listProjects(),
@@ -186,24 +189,45 @@ export const useAppStore = create<AppState>()((set, get) => {
     },
 
     async pickWorkspace() {
+      let switched = false;
       try {
+        const { useCanvasStore } = await import("./canvasStore");
+        await useCanvasStore.getState().flush();
         const ws = await backend.pickWorkspace();
-        if (ws) await enter(ws);
+        if (ws) {
+          switched = true; navigation++;
+          invalidateOperations(); cancelPrompts(); useCanvasStore.getState().reset();
+          set({ status: "loading", workspace: ws, searchOpen: false });
+          await enter(ws);
+        }
       } catch (e) {
+        if (switched) set({ status: "no-workspace", workspace: null, tabs: [], projects: [], canvases: [], assets: new Map() });
         get().showToast(t("打开工作区失败：{error}", { error: String(e) }));
       }
     },
 
-    navigate: (view) =>
-      set((s) => {
+    navigate: (view) => {
+      const request = ++navigation;
+      commitEditors();
+      void import("./canvasStore").then(async ({ useCanvasStore }) => {
+        await useCanvasStore.getState().flush();
+        if (request !== navigation) return;
+        set((s) => {
         if (view.kind !== "canvas" || s.tabs.includes(view.canvasId)) return { view };
         const at = s.view.kind === "canvas" ? s.tabs.indexOf(s.view.canvasId) : -1;
         const tabs = at >= 0 ? [...s.tabs.slice(0, at + 1), view.canvasId, ...s.tabs.slice(at + 1)] : [...s.tabs, view.canvasId];
         return { view, tabs };
-      }),
+        });
+      }).catch((error) => get().showToast(t("保存失败：{error}", { error: String(error) })));
+    },
 
-    closeTabs: (ids) =>
-      set((s) => {
+    closeTabs: (ids) => {
+      const request = ++navigation;
+      commitEditors();
+      void import("./canvasStore").then(async ({ useCanvasStore }) => {
+        await useCanvasStore.getState().flush();
+        if (request !== navigation) return;
+        set((s) => {
         const gone = new Set(ids);
         const tabs = s.tabs.filter((id) => !gone.has(id));
         const v = s.view;
@@ -217,7 +241,9 @@ export const useAppStore = create<AppState>()((set, get) => {
             ? { kind: "project", projectId: meta.projectId }
             : { kind: "recent" };
         return { tabs, view };
-      }),
+        });
+      }).catch((error) => get().showToast(t("保存失败：{error}", { error: String(error) })));
+    },
 
     cycleTab(delta) {
       const { tabs, view, navigate } = get();
@@ -243,18 +269,24 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     async createProject(name) {
       const color = PROJECT_COLORS[get().projects.length % PROJECT_COLORS.length];
+      const workspace = get().workspace;
       const p = await backend.createProject(name, color);
+      if (get().workspace !== workspace) return p;
       set((s) => ({ projects: [...s.projects, p], view: { kind: "project", projectId: p.id } }));
       return p;
     },
 
     async updateProject(id, patch) {
+      const workspace = get().workspace;
       const p = await backend.updateProject(id, patch);
+      if (get().workspace !== workspace) return;
       set((s) => ({ projects: s.projects.map((x) => (x.id === id ? p : x)) }));
     },
 
     async createCanvas(projectId, title = t("未命名画布")) {
+      const workspace = get().workspace;
       const meta = await backend.createCanvas(projectId, title);
+      if (get().workspace !== workspace) return meta;
       set((s) => ({ canvases: [...s.canvases, meta] }));
       get().navigate({ kind: "canvas", canvasId: meta.id });
       return meta;
@@ -262,7 +294,9 @@ export const useAppStore = create<AppState>()((set, get) => {
 
     async updateCanvas(id, patch) {
       const before = get().canvases.find((c) => c.id === id);
+      const workspace = get().workspace;
       const meta = await backend.updateCanvas(id, patch);
+      if (get().workspace !== workspace) return;
       get().canvasSaved(meta);
       // 移到的项目里已有同名画布时，后台自动加上了「(2)」
       if (!patch.title && before && meta.title !== before.title) {
@@ -271,8 +305,13 @@ export const useAppStore = create<AppState>()((set, get) => {
     },
 
     async deleteCanvas(id) {
+      const { useCanvasStore } = await import("./canvasStore");
+      await useCanvasStore.getState().flush();
       const meta = get().canvases.find((c) => c.id === id);
+      const workspace = get().workspace;
       await backend.deleteCanvas(id);
+      if (get().workspace !== workspace) return;
+      if (useCanvasStore.getState().doc?.canvasId === id) useCanvasStore.getState().reset();
       if (meta) get().showToast(t("已把「{name}」移到回收站", { name: meta.title }));
       get().closeTabs([id]);
       set((s) => ({ canvases: s.canvases.filter((c) => c.id !== id) }));
@@ -291,7 +330,9 @@ export const useAppStore = create<AppState>()((set, get) => {
     },
 
     async refreshAssets() {
-      set({ assets: toMap(await backend.listAssets()) });
+      const workspace = get().workspace;
+      const assets = await backend.listAssets();
+      if (get().workspace === workspace) set({ assets: toMap(assets) });
     },
   };
 });

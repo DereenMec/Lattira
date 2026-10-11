@@ -1,9 +1,10 @@
-import { memo, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useMemo, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { canvasAncestor } from "@/lib/folders";
-import { center, rectEdgePoint, type Point } from "@/lib/geometry";
+import { center, intersects, rectEdgePoint, type Point, type Rect } from "@/lib/geometry";
 import type { CanvasElement, Edge, ID } from "@/types/model";
 
 interface Props {
+  visibleRect?: Rect;
   edges: Edge[];
   elements: CanvasElement[];
   selectedEdgeId: ID | null;
@@ -13,12 +14,23 @@ interface Props {
   onContextMenu(e: ReactMouseEvent, id: ID): void;
 }
 
-function EdgeLayerImpl({ edges, elements, selectedEdgeId, pending, onSelect, onContextMenu }: Props) {
-  const byId = new Map(elements.map((e) => [e.id, e]));
+function EdgeLayerImpl({ edges, elements, selectedEdgeId, pending, onSelect, onContextMenu, visibleRect }: Props) {
+  const lookup = useRef(new Map<ID, CanvasElement>());
+  const byId = useMemo(() => {
+    const map = lookup.current;
+    const live = new Set<ID>();
+    for (const el of elements) { live.add(el.id); if (map.get(el.id) !== el) map.set(el.id, el); }
+    if (map.size !== elements.length) for (const id of map.keys()) if (!live.has(id)) map.delete(id);
+    return map;
+  }, [elements]);
 
-  const segment = (from: CanvasElement, toPoint: Point, to?: CanvasElement) => {
-    const a = rectEdgePoint(from, to ? center(to) : toPoint);
-    const b = to ? rectEdgePoint(to, center(from)) : toPoint;
+  const sidePoint = (r: CanvasElement, side: Edge["fromSide"], fallback: Point) => side === "top" ? { x: r.x + r.width / 2, y: r.y }
+    : side === "bottom" ? { x: r.x + r.width / 2, y: r.y + r.height }
+    : side === "left" ? { x: r.x, y: r.y + r.height / 2 }
+    : side === "right" ? { x: r.x + r.width, y: r.y + r.height / 2 } : rectEdgePoint(r, fallback);
+  const segment = (from: CanvasElement, toPoint: Point, to?: CanvasElement, edge?: Edge) => {
+    const a = sidePoint(from, edge?.fromSide, to ? center(to) : toPoint);
+    const b = to ? sidePoint(to, edge?.toSide, center(from)) : toPoint;
     return `M${a.x} ${a.y}L${b.x} ${b.y}`;
   };
 
@@ -39,7 +51,12 @@ function EdgeLayerImpl({ edges, elements, selectedEdgeId, pending, onSelect, onC
         const from = canvasAncestor(byId, edge.fromId);
         const to = canvasAncestor(byId, edge.toId);
         if (!from || !to || from === to) return null;
-        const d = segment(from, center(to), to);
+        if (visibleRect && edge.id !== selectedEdgeId && !intersects(visibleRect, {
+          x: Math.min(from.x, to.x), y: Math.min(from.y, to.y),
+          width: Math.max(from.x + from.width, to.x + to.width) - Math.min(from.x, to.x),
+          height: Math.max(from.y + from.height, to.y + to.height) - Math.min(from.y, to.y),
+        })) return null;
+        const d = segment(from, center(to), to, edge);
         const selected = edge.id === selectedEdgeId;
         return (
           <g key={edge.id}>
@@ -55,8 +72,11 @@ function EdgeLayerImpl({ edges, elements, selectedEdgeId, pending, onSelect, onC
             <path
               d={d}
               className={selected ? "edge is-selected" : "edge"}
-              markerEnd={selected ? "url(#edge-arrow-selected)" : "url(#edge-arrow)"}
+              style={edge.color?.startsWith("#") ? { stroke: edge.color } : undefined}
+              markerStart={edge.fromEnd === "arrow" ? (selected ? "url(#edge-arrow-selected)" : "url(#edge-arrow)") : undefined}
+              markerEnd={edge.toEnd === "none" ? undefined : selected ? "url(#edge-arrow-selected)" : "url(#edge-arrow)"}
             />
+            {edge.label && <text x={(center(from).x + center(to).x) / 2} y={(center(from).y + center(to).y) / 2 - 6} className="edge-label">{edge.label}</text>}
           </g>
         );
       })}

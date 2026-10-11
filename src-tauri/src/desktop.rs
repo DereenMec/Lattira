@@ -4,7 +4,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -43,15 +42,12 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
-/// 先让前端把未保存的修改写盘，前端没有响应时 3 秒后直接退出
+/// Exit only after the frontend has committed editor drafts and saved successfully.
 fn request_quit(app: &AppHandle) {
-    app.state::<Desktop>().quitting.store(true, Ordering::SeqCst);
+    if app.state::<Desktop>().quitting.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let _ = app.emit("quit-requested", ());
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(3));
-        handle.exit(0);
-    });
 }
 
 pub fn setup_tray(app: &App) -> tauri::Result<()> {
@@ -68,7 +64,12 @@ pub fn setup_tray(app: &App) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
                 show_main(tray.app_handle());
             }
         });
@@ -84,9 +85,12 @@ pub fn setup_tray(app: &App) -> tauri::Result<()> {
 pub fn on_window_event(window: &Window, event: &WindowEvent) {
     if let WindowEvent::CloseRequested { api, .. } = event {
         let desktop = window.state::<Desktop>();
-        if desktop.close_to_tray.load(Ordering::SeqCst) && !desktop.quitting.load(Ordering::SeqCst) {
-            api.prevent_close();
+        api.prevent_close();
+        if desktop.close_to_tray.load(Ordering::SeqCst) && !desktop.quitting.load(Ordering::SeqCst)
+        {
             let _ = window.hide();
+        } else {
+            request_quit(window.app_handle());
         }
     }
 }
@@ -108,9 +112,20 @@ fn lock_err<T>(_: T) -> Error {
 
 /// 设置呼出主界面的全局快捷键；None 表示不使用。格式如 Ctrl+Shift+KeyL
 #[tauri::command]
-pub async fn set_global_shortcut(app: AppHandle, desktop: State<'_, Desktop>, accelerator: Option<String>) -> Result<()> {
-    let wanted = match accelerator.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
-        Some(a) => Some(a.parse::<Shortcut>().map_err(|_| Error::Invalid(format!("快捷键格式不正确：{a}")))?),
+pub async fn set_global_shortcut(
+    app: AppHandle,
+    desktop: State<'_, Desktop>,
+    accelerator: Option<String>,
+) -> Result<()> {
+    let wanted = match accelerator
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        Some(a) => Some(
+            a.parse::<Shortcut>()
+                .map_err(|_| Error::Invalid(format!("快捷键格式不正确：{a}")))?,
+        ),
         None => None,
     };
     let gs = app.global_shortcut();
@@ -129,7 +144,9 @@ pub async fn set_global_shortcut(app: AppHandle, desktop: State<'_, Desktop>, ac
                     *current = Some(old);
                 }
             }
-            return Err(Error::Invalid(format!("无法注册全局快捷键，可能已被其他程序占用：{e}")));
+            return Err(Error::Invalid(format!(
+                "无法注册全局快捷键，可能已被其他程序占用：{e}"
+            )));
         }
     }
     *current = wanted;
@@ -144,7 +161,13 @@ pub async fn set_close_to_tray(desktop: State<'_, Desktop>, enabled: bool) -> Re
 
 /// 托盘菜单随界面语言切换
 #[tauri::command]
-pub async fn set_tray_labels(app: AppHandle, desktop: State<'_, Desktop>, show: String, quit: String, tooltip: String) -> Result<()> {
+pub async fn set_tray_labels(
+    app: AppHandle,
+    desktop: State<'_, Desktop>,
+    show: String,
+    quit: String,
+    tooltip: String,
+) -> Result<()> {
     if let Some((show_item, quit_item)) = desktop.menu.lock().map_err(lock_err)?.as_ref() {
         show_item.set_text(show)?;
         quit_item.set_text(quit)?;
@@ -159,5 +182,14 @@ pub async fn set_tray_labels(app: AppHandle, desktop: State<'_, Desktop>, show: 
 #[tauri::command]
 pub async fn exit_app(app: AppHandle) -> Result<()> {
     app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_quit(app: AppHandle) -> Result<()> {
+    app.state::<Desktop>()
+        .quitting
+        .store(false, Ordering::SeqCst);
+    show_main(&app);
     Ok(())
 }

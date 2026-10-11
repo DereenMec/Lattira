@@ -38,7 +38,8 @@ pub struct LinkPreview {
 }
 
 fn parse_web_url(url: &str) -> Result<Url> {
-    let parsed = Url::parse(url.trim()).map_err(|_| Error::Invalid(format!("不是有效的网址：{url}")))?;
+    let parsed =
+        Url::parse(url.trim()).map_err(|_| Error::Invalid(format!("不是有效的网址：{url}")))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(Error::Invalid(format!("只支持 http 和 https 链接：{url}")));
     }
@@ -108,7 +109,10 @@ async fn fetch_preview(root: &Path, url: &str) -> Result<LinkPreview> {
     }
     // PDF 等其他文件：用文件名作标题
     if !ctype.is_empty() && !ctype.contains("html") {
-        return Ok(LinkPreview { title: file_name(&base), ..Default::default() });
+        return Ok(LinkPreview {
+            title: file_name(&base),
+            ..Default::default()
+        });
     }
 
     let bytes = read_limited(resp, PAGE_LIMIT).await?;
@@ -121,7 +125,12 @@ async fn fetch_preview(root: &Path, url: &str) -> Result<LinkPreview> {
     };
     let mut icon = None;
     let fallback_icon = base.join("/favicon.ico").ok();
-    for u in meta.icons.iter().filter_map(|s| base.join(s).ok()).chain(fallback_icon) {
+    for u in meta
+        .icons
+        .iter()
+        .filter_map(|s| base.join(s).ok())
+        .chain(fallback_icon)
+    {
         icon = download_image(&client, root, &u).await;
         if icon.is_some() {
             break;
@@ -158,7 +167,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Some(b) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+            if let Some(b) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
                 out.push(b);
                 i += 3;
                 continue;
@@ -191,7 +203,7 @@ async fn download_image(client: &Client, root: &Path, url: &Url) -> Option<Strin
 }
 
 /// 按网址命名保存到 .lattira/links/，返回相对工作区的路径；同一张图只存一份
-fn save_image(root: &Path, url: &Url, ctype: &str, bytes: &[u8]) -> Option<String> {
+fn save_image(root: &Path, _url: &Url, ctype: &str, bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() || bytes.len() >= IMAGE_LIMIT {
         return None;
     }
@@ -206,7 +218,10 @@ fn save_image(root: &Path, url: &Url, ctype: &str, bytes: &[u8]) -> Option<Strin
         "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
         _ => return None,
     };
-    let hash: String = Sha256::digest(url.as_str().as_bytes()).iter().take(12).map(|b| format!("{b:02x}")).collect();
+    let hash: String = Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let rel = format!("{LINKS_DIR}/{hash}.{ext}");
     let abs = files::resolve(root, &rel);
     if !abs.is_file() {
@@ -236,7 +251,9 @@ fn decode_html(bytes: &[u8], ctype: &str) -> String {
     let label = charset_in(ctype).or_else(|| {
         let at = head.find("charset=")?;
         let rest = head[at + 8..].trim_start_matches(['"', '\'']);
-        let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')).unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(rest.len());
         Some(rest[..end].to_string())
     });
     let encoding = label
@@ -247,7 +264,11 @@ fn decode_html(bytes: &[u8], ctype: &str) -> String {
 
 fn charset_in(ctype: &str) -> Option<String> {
     let at = ctype.find("charset=")?;
-    Some(ctype[at + 8..].trim_matches(['"', '\'', ' ', ';']).to_string())
+    Some(
+        ctype[at + 8..]
+            .trim_matches(['"', '\'', ' ', ';'])
+            .to_string(),
+    )
 }
 
 fn parse_html(html: &str) -> PageMeta {
@@ -267,7 +288,9 @@ fn parse_html(html: &str) -> PageMeta {
     let mut pos = 0;
     while let Some(off) = lower[pos..].find('<') {
         let start = pos + off;
-        let Some(len) = lower[start..].find('>') else { break };
+        let Some(len) = lower[start..].find('>') else {
+            break;
+        };
         let end = start + len;
         let tag = &html[start + 1..end];
         let tag_lower = &lower[start + 1..end];
@@ -275,8 +298,12 @@ fn parse_html(html: &str) -> PageMeta {
 
         if tag_lower.starts_with("meta") {
             let attrs = attributes(&tag[4..]);
-            let key = attr(&attrs, "property").or_else(|| attr(&attrs, "name")).map(str::to_ascii_lowercase);
-            let Some(content) = attr(&attrs, "content").map(clean) else { continue };
+            let key = attr(&attrs, "property")
+                .or_else(|| attr(&attrs, "name"))
+                .map(str::to_ascii_lowercase);
+            let Some(content) = attr(&attrs, "content").map(clean) else {
+                continue;
+            };
             if content.is_empty() {
                 continue;
             }
@@ -295,9 +322,12 @@ fn parse_html(html: &str) -> PageMeta {
         } else if tag_lower.starts_with("link") {
             let attrs = attributes(&tag[4..]);
             let rel = attr(&attrs, "rel").unwrap_or_default().to_ascii_lowercase();
-            let Some(href) = attr(&attrs, "href").map(clean).filter(|h| !h.is_empty()) else { continue };
+            let Some(href) = attr(&attrs, "href").map(clean).filter(|h| !h.is_empty()) else {
+                continue;
+            };
             let rels: Vec<&str> = rel.split_whitespace().collect();
-            if rels.contains(&"apple-touch-icon") || rels.contains(&"apple-touch-icon-precomposed") {
+            if rels.contains(&"apple-touch-icon") || rels.contains(&"apple-touch-icon-precomposed")
+            {
                 touch_icons.push(href);
             } else if rels.contains(&"icon") {
                 icons.push(href);
@@ -312,7 +342,11 @@ fn parse_html(html: &str) -> PageMeta {
             }
         } else if tag_lower.starts_with("script") || tag_lower.starts_with("style") {
             // 跳过脚本和样式的内容，里面的 < 不是标签
-            let close = if tag_lower.starts_with("script") { "</script" } else { "</style" };
+            let close = if tag_lower.starts_with("script") {
+                "</script"
+            } else {
+                "</style"
+            };
             match lower[pos..].find(close) {
                 Some(n) => pos += n,
                 None => break,
@@ -384,7 +418,10 @@ fn attributes(s: &str) -> Vec<(String, String)> {
 }
 
 fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    attrs.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    attrs
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
 }
 
 /// 解码 HTML 实体并合并空白
@@ -404,7 +441,9 @@ fn clean(s: &str) -> String {
                 "apos" => Some('\''),
                 "nbsp" => Some(' '),
                 _ if ent.starts_with("#x") || ent.starts_with("#X") => {
-                    u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32)
+                    u32::from_str_radix(&ent[2..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
                 }
                 _ if ent.starts_with('#') => ent[1..].parse().ok().and_then(char::from_u32),
                 _ => None,
@@ -429,6 +468,7 @@ fn clean(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn prefers_open_graph_and_collects_icons() {
@@ -454,10 +494,27 @@ mod tests {
 
     #[test]
     fn falls_back_to_title_tag() {
-        let meta = parse_html("<html><head><TITLE>Hello&#x20;World&#33;</TITLE></head><body><p>x</p></body></html>");
+        let meta = parse_html(
+            "<html><head><TITLE>Hello&#x20;World&#33;</TITLE></head><body><p>x</p></body></html>",
+        );
         assert_eq!(meta.title.as_deref(), Some("Hello World!"));
         assert_eq!(meta.description, None);
         assert!(meta.icons.is_empty());
+    }
+
+    #[test]
+    fn refreshed_image_uses_new_content_address() {
+        let root = std::env::temp_dir().join(format!(
+            "lattira-link-refresh-{}",
+            crate::workspace::new_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let url = Url::parse("https://example.com/image.png").unwrap();
+        let first = save_image(&root, &url, "image/png", b"first").unwrap();
+        let second = save_image(&root, &url, "image/png", b"second").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fs::read(root.join(second)).unwrap(), b"second");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -471,7 +528,8 @@ mod tests {
 
     #[test]
     fn decodes_gbk_pages() {
-        let (bytes, _, _) = encoding_rs::GBK.encode("<meta charset=\"gbk\"><title>中文标题</title>");
+        let (bytes, _, _) =
+            encoding_rs::GBK.encode("<meta charset=\"gbk\"><title>中文标题</title>");
         let html = decode_html(&bytes, "text/html");
         assert_eq!(parse_html(&html).title.as_deref(), Some("中文标题"));
         let html = decode_html(&bytes, "text/html; charset=GBK");
@@ -482,7 +540,10 @@ mod tests {
     fn file_name_from_url() {
         let u = Url::parse("https://example.com/docs/%E6%8A%A5%E5%91%8A.pdf?x=1").unwrap();
         assert_eq!(file_name(&u).as_deref(), Some("报告.pdf"));
-        assert_eq!(file_name(&Url::parse("https://example.com/").unwrap()), None);
+        assert_eq!(
+            file_name(&Url::parse("https://example.com/").unwrap()),
+            None
+        );
     }
 
     /// 需要联网：cargo test fetch_real_page -- --ignored --nocapture

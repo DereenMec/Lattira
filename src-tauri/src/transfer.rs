@@ -23,7 +23,7 @@ use tauri::{AppHandle, State};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::commands::{self, CanvasMeta, MAX_IMPORT_FILES};
+use crate::commands::{self, CanvasMeta, ImportNode, ImportPlan, ImportProgress, MAX_IMPORT_FILES};
 use crate::error::{Error, Result};
 use crate::files;
 use crate::ocr;
@@ -35,22 +35,41 @@ const MAX_PACKAGE_BYTES: u64 = 8 << 30;
 /// 本身已经压缩过的格式，打包时不再压缩
 fn already_compressed(name: &str) -> bool {
     const EXTS: &[&str] = &[
-        "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "mp3", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv",
-        "webm", "avi", "zip", "7z", "rar", "gz", "xz", "bz2", "zst", "docx", "xlsx", "pptx", "epub", "vsix", "woff2",
+        "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "mp3", "m4a", "aac", "ogg", "flac",
+        "mp4", "mov", "mkv", "webm", "avi", "zip", "7z", "rar", "gz", "xz", "bz2", "zst", "docx",
+        "xlsx", "pptx", "epub", "vsix", "woff2",
     ];
-    let ext = Path::new(name).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let ext = Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     EXTS.contains(&ext.as_str())
 }
 
 /// 包内不重名的文件名（不区分大小写）
 fn entry_name(name: &str, used: &mut HashSet<String>) -> String {
     let p = Path::new(name);
-    let stem = files::sanitize(&p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
-    let ext = p.extension().map(|e| files::sanitize(&e.to_string_lossy())).unwrap_or_default();
+    let stem = files::sanitize(
+        &p.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let ext = p
+        .extension()
+        .map(|e| files::sanitize(&e.to_string_lossy()))
+        .unwrap_or_default();
     let mut n = 1;
     loop {
-        let base = if n == 1 { stem.clone() } else { format!("{stem} ({n})") };
-        let candidate = if ext.is_empty() { base } else { format!("{base}.{ext}") };
+        let base = if n == 1 {
+            stem.clone()
+        } else {
+            format!("{stem} ({n})")
+        };
+        let candidate = if ext.is_empty() {
+            base
+        } else {
+            format!("{base}.{ext}")
+        };
         if used.insert(candidate.to_lowercase()) {
             return candidate;
         }
@@ -59,16 +78,27 @@ fn entry_name(name: &str, used: &mut HashSet<String>) -> String {
 }
 
 fn write_package(dest: &Path, title: &str, doc: &Value, files: &[(String, PathBuf)]) -> Result<()> {
-    let mut zip = ZipWriter::new(fs::File::create(dest)?);
-    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated).large_file(true);
-    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored).large_file(true);
+    let mut zip = ZipWriter::new(crate::journal::create(dest)?);
+    let deflated = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .large_file(true);
+    let stored = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .large_file(true);
     zip.start_file(format!("{}.canvas", files::sanitize(title)), deflated)?;
     zip.write_all(serde_json::to_string_pretty(doc)?.as_bytes())?;
     for (entry, src) in files {
-        zip.start_file(entry.as_str(), if already_compressed(entry) { stored } else { deflated })?;
+        zip.start_file(
+            entry.as_str(),
+            if already_compressed(entry) {
+                stored
+            } else {
+                deflated
+            },
+        )?;
         io::copy(&mut BufReader::new(fs::File::open(src)?), &mut zip)?;
     }
-    zip.finish()?;
+    zip.finish()?.sync_all()?;
     Ok(())
 }
 
@@ -76,62 +106,97 @@ fn write_package(dest: &Path, title: &str, doc: &Value, files: &[(String, PathBu
 #[tauri::command]
 pub async fn export_canvas(state: State<'_, AppState>, id: String, dest: String) -> Result<()> {
     // 只在读取元数据时占用工作区，打包大文件时不挡住其他操作
-    let (title, doc, packed) = state.with(|ws| {
-        let meta = commands::get_canvas(&ws.conn, &id)?;
-        let path = ws.abs(&commands::canvas_file(&ws.conn, &id)?);
-        let mut doc: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
-        let mut packed: Vec<(String, PathBuf)> = Vec::new();
-        let mut by_asset: HashMap<String, String> = HashMap::new();
-        let mut used = HashSet::new();
-        if let Some(nodes) = doc.get_mut("nodes").and_then(|n| n.as_array_mut()) {
-            for node in nodes {
-                let Some(asset_id) = node.pointer("/lattira/assetId").and_then(|v| v.as_str()).map(str::to_string)
-                else {
-                    continue;
-                };
-                let entry = match by_asset.get(&asset_id) {
-                    Some(entry) => entry.clone(),
-                    None => {
-                        let Some(asset) = commands::get_asset(&ws.conn, "id", &asset_id)? else { continue };
-                        let src = ws.abs(&asset.path);
-                        if !src.is_file() {
-                            continue;
-                        }
-                        let entry = format!("assets/{}", entry_name(&asset.name, &mut used));
-                        packed.push((entry.clone(), src));
-                        by_asset.insert(asset_id, entry.clone());
-                        entry
-                    }
-                };
-                node["file"] = Value::String(entry);
-            }
-        }
-        Ok((meta.title, doc, packed))
-    })?;
+    let (title, doc, packed) = state.with(|ws| prepare_export(ws, &id))?;
 
     let dest = PathBuf::from(dest);
-    let tmp = dest.with_extension("zip.tmp");
+    let tmp = dest.with_extension(format!("{}.zip.tmp", new_id()));
     match write_package(&tmp, &title, &doc, &packed) {
-        Ok(()) => Ok(fs::rename(&tmp, &dest)?),
+        Ok(()) => Ok(crate::journal::rename(&tmp, &dest)?),
         Err(e) => {
-            let _ = fs::remove_file(&tmp);
+            let _ = crate::journal::remove_file(&tmp);
             Err(e)
         }
     }
+}
+
+fn prepare_export(ws: &Workspace, id: &str) -> Result<(String, Value, Vec<(String, PathBuf)>)> {
+    let meta = commands::get_canvas(&ws.conn, &id)?;
+    let path = ws.abs(&commands::canvas_file(&ws.conn, &id)?);
+    let mut doc: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+    let mut packed: Vec<(String, PathBuf)> = Vec::new();
+    let mut by_asset: HashMap<String, String> = HashMap::new();
+    let mut used = HashSet::new();
+    if let Some(nodes) = doc.get_mut("nodes").and_then(|n| n.as_array_mut()) {
+        for node in nodes {
+            for key in ["image", "icon"] {
+                let pointer = format!("/lattira/link/{key}");
+                if let Some(rel) = node
+                    .pointer(&pointer)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    let src = ws.abs(&rel);
+                    if src.is_file() && rel.starts_with(".lattira/links/") {
+                        let entry = format!(
+                            "links/{}",
+                            entry_name(
+                                src.file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .as_ref(),
+                                &mut used
+                            )
+                        );
+                        packed.push((entry.clone(), src));
+                        node["lattira"]["link"][key] = json!(entry);
+                    }
+                }
+            }
+            let Some(asset_id) = node
+                .pointer("/lattira/assetId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let entry = match by_asset.get(&asset_id) {
+                Some(entry) => entry.clone(),
+                None => {
+                    let Some(asset) = commands::get_asset(&ws.conn, "id", &asset_id)? else {
+                        continue;
+                    };
+                    let src = ws.abs(&asset.path);
+                    if !src.is_file() {
+                        continue;
+                    }
+                    let entry = format!("assets/{}", entry_name(&asset.name, &mut used));
+                    packed.push((entry.clone(), src));
+                    by_asset.insert(asset_id, entry.clone());
+                    entry
+                }
+            };
+            node["file"] = Value::String(entry);
+        }
+    }
+    Ok((meta.title, doc, packed))
 }
 
 /// 解压画布包到 dir，返回其中的 .canvas 文件（按路径排序）
 fn extract_package(src: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
     let mut archive = ZipArchive::new(BufReader::new(fs::File::open(src)?))?;
     if archive.len() > MAX_IMPORT_FILES + 100 {
-        return Err(Error::Invalid(format!("压缩包里的文件太多，一次最多导入 {MAX_IMPORT_FILES} 个文件")));
+        return Err(Error::Invalid(format!(
+            "压缩包里的文件太多，一次最多导入 {MAX_IMPORT_FILES} 个文件"
+        )));
     }
     let mut total = 0u64;
     let mut canvases = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         // 跳过目录、带 .. 或绝对路径的条目，以及 macOS 打包时附带的元数据
-        let Some(rel) = entry.enclosed_name() else { continue };
+        let Some(rel) = entry.enclosed_name() else {
+            continue;
+        };
         if entry.is_dir() || rel.starts_with("__MACOSX") {
             continue;
         }
@@ -144,8 +209,14 @@ fn extract_package(src: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
             fs::create_dir_all(parent)?;
         }
         let size = entry.size();
-        io::copy(&mut entry.by_ref().take(size), &mut fs::File::create(&out)?)?;
-        if out.extension().is_some_and(|e| e.eq_ignore_ascii_case("canvas")) {
+        io::copy(
+            &mut entry.by_ref().take(size),
+            &mut crate::journal::create(&out)?,
+        )?;
+        if out
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("canvas"))
+        {
             canvases.push(out);
         }
     }
@@ -164,59 +235,188 @@ fn locate(file: &str, base: &Path, scope: Option<&Path>) -> Option<PathBuf> {
     let rel = Path::new(file);
     match scope {
         Some(root) => {
-            let escapes = rel.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
+            let escapes = rel
+                .components()
+                .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
             if escapes {
                 return None;
             }
-            [base, root].iter().map(|b| b.join(rel)).find(|p| p.is_file())
+            [base, root]
+                .iter()
+                .map(|b| b.join(rel))
+                .find(|p| p.is_file())
         }
         None if rel.is_absolute() => rel.is_file().then(|| rel.to_path_buf()),
-        None => base.ancestors().take(8).map(|d| d.join(rel)).find(|p| p.is_file()),
+        None => base
+            .ancestors()
+            .take(8)
+            .map(|d| d.join(rel))
+            .find(|p| p.is_file()),
     }
 }
 
 fn number(node: &Value, key: &str, fallback: f64) -> Value {
-    json!(node.get(key).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(fallback))
+    json!(node
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .unwrap_or(fallback))
 }
 
 /// 导入一个 .canvas 文件：复制引用的文件进工作区，写入项目文件夹并登记
-fn import_canvas_file(ws: &Workspace, project_id: &str, path: &Path, scope: Option<&Path>) -> Result<CanvasMeta> {
-    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+fn import_canvas_file(
+    ws: &Workspace,
+    project_id: &str,
+    path: &Path,
+    scope: Option<&Path>,
+) -> Result<CanvasMeta> {
+    import_canvas_preloaded(ws, project_id, path, scope, None)
+}
+
+fn import_canvas_preloaded(
+    ws: &Workspace,
+    project_id: &str,
+    path: &Path,
+    scope: Option<&Path>,
+    preloaded: Option<&HashMap<PathBuf, commands::Asset>>,
+) -> Result<CanvasMeta> {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let invalid = || Error::Invalid(format!("「{file_name}」不是有效的画布文件"));
     let raw = fs::read_to_string(path)?;
-    let mut doc: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}')).map_err(|_| invalid())?;
+    let mut doc: Value =
+        serde_json::from_str(raw.trim_start_matches('\u{feff}')).map_err(|_| invalid())?;
     let obj = doc.as_object_mut().ok_or_else(invalid)?;
-    if !obj.get("nodes").is_some_and(Value::is_array) {
+    if obj.get("nodes").is_some_and(|v| !v.is_array())
+        || obj.get("edges").is_some_and(|v| !v.is_array())
+    {
+        return Err(invalid());
+    }
+    if !obj.contains_key("nodes") {
         obj.insert("nodes".into(), json!([]));
     }
-    if !obj.get("edges").is_some_and(Value::is_array) {
+    if !obj.contains_key("edges") {
         obj.insert("edges".into(), json!([]));
     }
 
     let base = path.parent().unwrap_or(Path::new("."));
     let now = now_ms();
     let nodes = doc["nodes"].as_array_mut().ok_or_else(invalid)?;
-    nodes.retain(Value::is_object);
+    if nodes.iter().any(|node| !node.is_object()) {
+        return Err(invalid());
+    }
+    let mut ids = HashSet::new();
     for node in nodes.iter_mut() {
         // 手写或其他工具生成的文件可能缺字段，补齐后前端才能正常显示
         if !node.get("id").is_some_and(Value::is_string) {
             node["id"] = json!(new_id());
         }
+        if !ids.insert(node["id"].as_str().unwrap_or_default().to_string()) || node["id"] == "" {
+            return Err(invalid());
+        }
+        if !["text", "file", "link", "group"].contains(&node["type"].as_str().unwrap_or_default()) {
+            return Err(invalid());
+        }
         for (key, fallback) in [("x", 0.0), ("y", 0.0), ("width", 250.0), ("height", 60.0)] {
+            if node.get(key).is_some_and(|v| v.as_f64().is_none()) {
+                return Err(invalid());
+            }
             node[key] = number(node, key, fallback);
+            let value = node[key].as_f64().unwrap_or(fallback);
+            if value.abs() > 1e9 || ((key == "width" || key == "height") && value <= 0.0) {
+                return Err(invalid());
+            }
+        }
+        for key in ["text", "url", "file", "label", "color"] {
+            if node.get(key).is_some_and(|v| !v.is_string()) {
+                return Err(invalid());
+            }
+        }
+        if let Some(extension) = node.get("lattira") {
+            if !extension.is_object() {
+                return Err(invalid());
+            }
+            for key in ["type", "assetId", "parent"] {
+                if extension.get(key).is_some_and(|v| !v.is_string()) {
+                    return Err(invalid());
+                }
+            }
+            for key in ["createdAt", "updatedAt"] {
+                if extension.get(key).is_some_and(|v| v.as_f64().is_none()) {
+                    return Err(invalid());
+                }
+            }
+            if let Some(link) = extension.get("link") {
+                if !link.is_object() {
+                    return Err(invalid());
+                }
+                for key in ["title", "description", "siteName", "image", "icon"] {
+                    if link.get(key).is_some_and(|v| !v.is_string()) {
+                        return Err(invalid());
+                    }
+                }
+            }
+        }
+        for key in ["image", "icon"] {
+            let pointer = format!("/lattira/link/{key}");
+            if let Some(rel) = node
+                .pointer(&pointer)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                node["lattira"]["link"]
+                    .as_object_mut()
+                    .ok_or_else(invalid)?
+                    .remove(key);
+                if let Some(src) = locate(&rel, base, scope) {
+                    let hash = commands::hash_file(&src)?;
+                    let ext = src
+                        .extension()
+                        .map(|e| files::sanitize(&e.to_string_lossy()))
+                        .unwrap_or_else(|| "png".into());
+                    let rel = format!(".lattira/links/{hash}.{ext}");
+                    let dest = ws.abs(&rel);
+                    if !dest.exists() {
+                        fs::create_dir_all(dest.parent().unwrap())?;
+                        crate::journal::copy(&src, &dest)?;
+                    }
+                    node["lattira"]["link"][key] = json!(rel);
+                }
+            }
         }
         if node.get("type").and_then(Value::as_str) != Some("file") {
             continue;
         }
-        let file = node.get("file").and_then(Value::as_str).unwrap_or_default().to_string();
-        let created = node.pointer("/lattira/createdAt").and_then(Value::as_i64).unwrap_or(now);
-        let updated = node.pointer("/lattira/updatedAt").and_then(Value::as_i64).unwrap_or(now);
+        let file = node
+            .get("file")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let created = node
+            .pointer("/lattira/createdAt")
+            .and_then(Value::as_i64)
+            .unwrap_or(now);
+        let updated = node
+            .pointer("/lattira/updatedAt")
+            .and_then(Value::as_i64)
+            .unwrap_or(now);
         // 所在的文件夹（栖页画布里放在文件夹中的卡片）
         let parent = node.pointer("/lattira/parent").cloned();
         let mut lattira = match locate(&file, base, scope) {
             Some(src) => {
-                let asset = commands::import_file(ws, &src)?;
-                let kind = if asset.mime.starts_with("image/") { "image" } else { "file" };
+                let asset = match preloaded.and_then(|assets| assets.get(&src)) {
+                    Some(asset) => {
+                        commands::get_asset(&ws.conn, "id", &asset.id)?.ok_or_else(invalid)?
+                    }
+                    None => commands::import_file(ws, &src)?,
+                };
+                let kind = if asset.mime.starts_with("image/") {
+                    "image"
+                } else {
+                    "file"
+                };
                 node["file"] = json!(asset.path);
                 json!({ "type": kind, "assetId": asset.id, "createdAt": created, "updatedAt": updated })
             }
@@ -232,15 +432,78 @@ fn import_canvas_file(ws: &Workspace, project_id: &str, path: &Path, scope: Opti
         if let Some(parent) = parent {
             lattira["parent"] = parent;
         }
-        node["lattira"] = lattira;
+        let mut extension = node
+            .get("lattira")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (key, value) in lattira.as_object().unwrap() {
+            extension.insert(key.clone(), value.clone());
+        }
+        node["lattira"] = Value::Object(extension);
     }
     let element_count = nodes.len() as i64;
+    let edges = doc["edges"].as_array_mut().ok_or_else(invalid)?;
+    let mut edge_ids = HashSet::new();
+    for edge in edges.iter_mut() {
+        if !edge.is_object() {
+            return Err(invalid());
+        }
+        if !edge.get("id").is_some_and(Value::is_string) {
+            edge["id"] = json!(new_id());
+        }
+        if !edge_ids.insert(edge["id"].as_str().unwrap_or_default().to_string()) {
+            return Err(invalid());
+        }
+        for key in ["label", "color"] {
+            if edge.get(key).is_some_and(|v| !v.is_string()) {
+                return Err(invalid());
+            }
+        }
+        for key in ["fromSide", "toSide"] {
+            if edge.get(key).is_some_and(|v| {
+                !["top", "right", "bottom", "left"].contains(&v.as_str().unwrap_or_default())
+            }) {
+                return Err(invalid());
+            }
+        }
+        for key in ["fromEnd", "toEnd"] {
+            if edge
+                .get(key)
+                .is_some_and(|v| !["none", "arrow"].contains(&v.as_str().unwrap_or_default()))
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    edges.retain(|edge| {
+        edge["fromNode"].as_str().is_some_and(|id| ids.contains(id))
+            && edge["toNode"].as_str().is_some_and(|id| ids.contains(id))
+    });
+    if doc.get("lattira").is_some_and(|v| !v.is_object()) {
+        return Err(invalid());
+    }
+    if let Some(view) = doc.pointer("/lattira/viewport") {
+        if !["x", "y", "zoom"]
+            .iter()
+            .all(|key| view[key].as_f64().is_some_and(|v| v.is_finite()))
+            || view["zoom"].as_f64().is_none_or(|v| v <= 0.0 || v > 100.0)
+        {
+            return Err(invalid());
+        }
+    }
 
-    let title = path.file_stem().map(|s| s.to_string_lossy().trim().to_string()).filter(|s| !s.is_empty());
+    let title = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().trim().to_string())
+        .filter(|s| !s.is_empty());
     let title = title.unwrap_or_else(|| "导入的画布".into());
     // 项目里已有同名画布时加上「(2)」
     let title = commands::unique_canvas_title(&ws.conn, project_id, &title, None)?;
-    let dir = ws.root.join("projects").join(commands::project_dir(&ws.conn, project_id)?);
+    let dir = ws
+        .root
+        .join("projects")
+        .join(commands::project_dir(&ws.conn, project_id)?);
     fs::create_dir_all(&dir)?;
     let dest = files::unique_path(&dir, &files::sanitize(&title), "canvas", None);
     files::write_atomic(&dest, serde_json::to_string_pretty(&doc)?.as_bytes())?;
@@ -249,24 +512,100 @@ fn import_canvas_file(ws: &Workspace, project_id: &str, path: &Path, scope: Opti
         "INSERT INTO canvases (id, project_id, title, file, element_count, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         params![id, project_id, title, ws.rel(&dest), element_count, now],
     )?;
+    commands::index_document(ws, &id, &doc)?;
     commands::get_canvas(&ws.conn, &id)
 }
 
-fn import_one(state: &AppState, project_id: &str, path: &Path, tmp: &Path) -> Result<Vec<CanvasMeta>> {
-    let is_zip = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+fn import_prepared(
+    state: &AppState,
+    project_id: &str,
+    path: &Path,
+    scope: Option<&Path>,
+    progress: Option<&mut ImportProgress>,
+    expected_root: &Path,
+) -> Result<CanvasMeta> {
+    let Some(progress) = progress else {
+        return state.with(|ws| import_canvas_file(ws, project_id, path, scope));
+    };
+    let root = expected_root.to_path_buf();
+    if state.with(|ws| Ok(ws.root != root))? {
+        return Err(Error::Invalid("工作区已切换，导入已中止".into()));
+    }
+    let raw = fs::read_to_string(path)?;
+    let doc: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}'))?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    let mut assets = HashMap::new();
+    for node in doc["nodes"].as_array().into_iter().flatten() {
+        if node["type"] != "file" {
+            continue;
+        }
+        if let Some(src) = node["file"]
+            .as_str()
+            .and_then(|file| locate(file, base, scope))
+        {
+            if !assets.contains_key(&src) {
+                let plan = ImportPlan::File {
+                    size: fs::metadata(&src)?.len(),
+                    path: src.clone(),
+                };
+                if let ImportNode::File { asset } =
+                    commands::import_planned(state, &root, &plan, progress)?
+                {
+                    assets.insert(src, asset);
+                }
+            }
+        }
+    }
+    state.with(|ws| {
+        if ws.root != root {
+            return Err(Error::Invalid("工作区已切换，导入已中止".into()));
+        }
+        import_canvas_preloaded(ws, project_id, path, scope, Some(&assets))
+    })
+}
+
+fn import_one(
+    state: &AppState,
+    project_id: &str,
+    path: &Path,
+    tmp: &Path,
+    mut progress: Option<&mut ImportProgress>,
+) -> Result<Vec<CanvasMeta>> {
+    let is_zip = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
     if !is_zip {
-        return Ok(vec![state.with(|ws| import_canvas_file(ws, project_id, path, None))?]);
+        return Ok(vec![import_prepared(
+            state,
+            project_id,
+            path,
+            None,
+            progress,
+            tmp.parent().and_then(Path::parent).unwrap_or(tmp),
+        )?]);
     }
     let dir = tmp.join(format!("import-{}", new_id()));
     let result = (|| {
         let canvases = extract_package(path, &dir)?;
         if canvases.is_empty() {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             return Err(Error::Invalid(format!("「{name}」里没有 .canvas 画布文件")));
         }
         canvases
             .iter()
-            .map(|c| state.with(|ws| import_canvas_file(ws, project_id, c, Some(&dir))))
+            .map(|c| {
+                import_prepared(
+                    state,
+                    project_id,
+                    c,
+                    Some(&dir),
+                    progress.as_deref_mut(),
+                    tmp.parent().and_then(Path::parent).unwrap_or(tmp),
+                )
+            })
             .collect::<Result<Vec<_>>>()
     })();
     let _ = fs::remove_dir_all(&dir);
@@ -287,8 +626,18 @@ pub async fn import_canvases(
     })?;
     let tmp = root.join(".lattira").join("tmp");
     let mut out = Vec::new();
+    let mut progress = ImportProgress::for_app(&app, None, &[]);
     for p in &paths {
-        out.extend(import_one(&state, &project_id, Path::new(p), &tmp)?);
+        if state.with(|ws| Ok(ws.root != root))? {
+            return Err(Error::Invalid("工作区已切换，导入已中止".into()));
+        }
+        out.extend(import_one(
+            &state,
+            &project_id,
+            Path::new(p),
+            &tmp,
+            Some(&mut progress),
+        )?);
     }
     ocr::schedule(app, root);
     Ok(out)
@@ -303,9 +652,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lattira-transfer-{}", new_id()));
         fs::create_dir_all(dir.join("ws")).unwrap();
         let (ws, _) = Workspace::open(&dir.join("ws")).unwrap();
-        let project: String = ws.conn.query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| r.get(0)).unwrap();
+        let project: String = ws
+            .conn
+            .query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
 
-        // 一个引用了图片的画布
+        // Assets and link images must both survive a portable export.
+        fs::create_dir_all(ws.root.join(".lattira/links")).unwrap();
+        fs::write(ws.root.join(".lattira/links/preview.png"), "preview-bytes").unwrap();
         let src = dir.join("截图.png");
         fs::write(&src, "png-bytes").unwrap();
         let asset = commands::import_file(&ws, &src).unwrap();
@@ -317,22 +673,24 @@ mod tests {
                 { "id": "j", "type": "file", "file": asset.path, "x": 600, "y": 0, "width": 200, "height": 120,
                   "lattira": { "type": "image", "assetId": asset.id, "createdAt": 1, "updatedAt": 2 } }
             ],
-            "edges": [{ "id": "e", "fromNode": "t", "toNode": "i" }]
+            "edges": [{ "id": "e", "fromNode": "t", "toNode": "i", "fromEnd":"arrow", "toEnd":"none", "custom":"kept" }]
         });
 
         let package = dir.join("导出.zip");
-        let packed = vec![("assets/截图.png".to_string(), ws.abs(&asset.path))];
-        let mut exported = doc.clone();
-        for n in exported["nodes"].as_array_mut().unwrap().iter_mut().skip(1) {
-            n["file"] = json!("assets/截图.png");
-        }
-        write_package(&package, "竞品/对比", &exported, &packed).unwrap();
+        let mut doc = doc;
+        doc["nodes"].as_array_mut().unwrap().push(json!({"id":"link","type":"link","url":"https://example.com/","x":0,"y":200,"width":320,"height":128,"lattira":{"link":{"image":".lattira/links/preview.png"}}}));
+        let canvas_file = "projects/未分类/fixture.canvas";
+        fs::write(ws.abs(canvas_file), serde_json::to_vec(&doc).unwrap()).unwrap();
+        ws.conn.execute("INSERT INTO canvases(id,project_id,title,file,created_at,updated_at) VALUES('export',?1,'竞品/对比',?2,0,0)",params![project,canvas_file]).unwrap();
+        let (title, exported, packed) = prepare_export(&ws, "export").unwrap();
+        assert_eq!(packed.len(), 2);
+        write_package(&package, &title, &exported, &packed).unwrap();
 
         // 同一内容的文件导入后与现有资源合并，卡片指向现有资源
         let tmp = dir.join("tmp");
         let state = AppState::default();
         *state.ws.lock().unwrap() = Some(ws);
-        let metas = import_one(&state, &project, &package, &tmp).unwrap();
+        let metas = import_one(&state, &project, &package, &tmp, None).unwrap();
         assert_eq!(metas.len(), 1);
         assert_eq!(metas[0].title, "竞品_对比");
         state
@@ -343,10 +701,20 @@ mod tests {
                 assert_eq!(saved["nodes"][2]["lattira"]["assetId"], json!(asset.id));
                 assert_eq!(saved["nodes"][1]["file"], json!(asset.path));
                 assert_eq!(saved["edges"].as_array().unwrap().len(), 1);
+                assert_eq!(saved["edges"][0]["custom"], "kept");
+                assert_eq!(saved["edges"][0]["toEnd"], "none");
+                let image = saved["nodes"][3]["lattira"]["link"]["image"]
+                    .as_str()
+                    .unwrap();
+                assert!(image.starts_with(".lattira/links/"));
+                assert_eq!(fs::read_to_string(ws.abs(image))?, "preview-bytes");
                 Ok(())
             })
             .unwrap();
-        assert!(!tmp.read_dir().unwrap().any(|_| true), "临时解压目录应已清理");
+        assert!(
+            !tmp.read_dir().unwrap().any(|_| true),
+            "临时解压目录应已清理"
+        );
         drop(state);
         fs::remove_dir_all(&dir).ok();
     }
@@ -369,26 +737,44 @@ mod tests {
         .unwrap();
         fs::create_dir_all(dir.join("ws")).unwrap();
         let (ws, _) = Workspace::open(&dir.join("ws")).unwrap();
-        let project: String = ws.conn.query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| r.get(0)).unwrap();
+        let project: String = ws
+            .conn
+            .query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
 
-        let meta = import_canvas_file(&ws, &project, &dir.join("vault/画布/想法.canvas"), None).unwrap();
+        let meta =
+            import_canvas_file(&ws, &project, &dir.join("vault/画布/想法.canvas"), None).unwrap();
         assert_eq!(meta.title, "想法");
-        let saved: Value =
-            serde_json::from_str(&fs::read_to_string(ws.abs(&commands::canvas_file(&ws.conn, &meta.id).unwrap())).unwrap())
-                .unwrap();
+        let saved: Value = serde_json::from_str(
+            &fs::read_to_string(ws.abs(&commands::canvas_file(&ws.conn, &meta.id).unwrap()))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(saved["nodes"][0]["lattira"]["type"], json!("image"));
-        assert!(ws.abs(saved["nodes"][0]["file"].as_str().unwrap()).is_file());
+        assert!(ws
+            .abs(saved["nodes"][0]["file"].as_str().unwrap())
+            .is_file());
         // 放在文件夹里的卡片导入后仍在文件夹里
         assert_eq!(saved["nodes"][0]["lattira"]["parent"], json!("f"));
         assert_eq!(saved["nodes"][1]["lattira"]["parent"], json!("f"));
         assert_eq!(saved["nodes"][1]["type"], json!("text"));
-        assert!(saved["nodes"][1]["text"].as_str().unwrap().contains("附件/不存在.pdf"));
+        assert!(saved["nodes"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("附件/不存在.pdf"));
         assert!(saved["nodes"][2]["id"].is_string());
         assert_eq!(saved["nodes"][2]["width"], json!(250.0));
         assert!(saved["edges"].is_array());
 
         // 画布包里的路径不能跳出解压目录
-        assert!(locate("../附件/图.png", &dir.join("vault/画布"), Some(&dir.join("vault/画布"))).is_none());
+        assert!(locate(
+            "../附件/图.png",
+            &dir.join("vault/画布"),
+            Some(&dir.join("vault/画布"))
+        )
+        .is_none());
         drop(ws);
         fs::remove_dir_all(&dir).ok();
     }

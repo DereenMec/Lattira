@@ -3,6 +3,7 @@
  * 卡片先以网址的形式出现，获取到信息后再补上（不进撤销历史，见 canvasStore.patchQuietly）。
  */
 import { create } from "zustand";
+import { operationTarget } from "@/lib/operations";
 import { promptText } from "@/features/menu/PromptDialog";
 import type { Point } from "@/lib/geometry";
 import { uuidv7 } from "@/lib/id";
@@ -23,6 +24,7 @@ const MAX_LINKS = 20;
 
 /** 正在获取预览的链接卡片 */
 export const useLinkFetching = create<{ ids: ReadonlySet<ID> }>(() => ({ ids: new Set() }));
+const requests = new Map<string, { url: string; token: symbol }>();
 
 const setFetching = (id: ID, on: boolean) =>
   useLinkFetching.setState((s) => {
@@ -101,10 +103,15 @@ export function placeLinks(urls: string[], at: Point, parentId?: ID): LinkElemen
  */
 export async function fetchPreview(card: LinkElement, manual = false) {
   const canvasId = useCanvasStore.getState().doc?.canvasId;
-  if (!canvasId || useLinkFetching.getState().ids.has(card.id)) return;
+  const workspace = useAppStore.getState().workspace?.path;
+  const key = `${workspace}:${canvasId}:${card.id}`;
+  if (!canvasId || requests.get(key)?.url === card.url) return;
+  const token = Symbol();
+  requests.set(key, { url: card.url, token });
   setFetching(card.id, true);
   try {
     const p: LinkPreview = await backend.fetchLinkPreview(card.url);
+    if (workspace !== useAppStore.getState().workspace?.path || requests.get(key)?.token !== token) return;
     const current = useCanvasStore.getState().doc?.elements.find((e) => e.id === card.id);
     // 等待期间卡片被改成了别的网址：这次的结果作废
     if (current && (current.type !== "link" || current.url !== card.url)) return;
@@ -119,11 +126,11 @@ export async function fetchPreview(card: LinkElement, manual = false) {
         icon: p.icon ?? undefined,
         ...(grow ? { height: LINK_HEIGHT + LINK_IMAGE_HEIGHT } : {}),
       },
-    });
+    }, card.url);
   } catch (e) {
     if (manual) useAppStore.getState().showToast(t("获取链接预览失败：{error}", { error: String(e) }));
   } finally {
-    setFetching(card.id, false);
+    if (requests.get(key)?.token === token) { requests.delete(key); setFetching(card.id, false); }
   }
 }
 
@@ -135,8 +142,9 @@ export function parseTypedUrl(input: string): string | null {
 
 /** 弹框输入网址，在 at 处放一张链接卡片 */
 export async function promptLink(at: Point, parentId?: ID) {
+  const operation = operationTarget(parentId);
   const input = await promptText(t("添加链接：输入网址"));
-  if (input === null) return;
+  if (input === null || !operation.valid()) return;
   const url = parseTypedUrl(input);
   if (!url) {
     useAppStore.getState().showToast(t("不是有效的网址：{url}", { url: input }));
@@ -148,8 +156,9 @@ export async function promptLink(at: Point, parentId?: ID) {
 
 /** 弹框修改链接卡片的网址 */
 export async function editLink(card: LinkElement) {
+  const operation = operationTarget();
   const input = await promptText(t("修改网址"), card.url);
-  if (input === null) return;
+  if (input === null || !operation.valid()) return;
   const url = parseTypedUrl(input);
   if (!url) useAppStore.getState().showToast(t("不是有效的网址：{url}", { url: input }));
   else if (url !== card.url) changeUrl(card, url);

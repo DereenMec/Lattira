@@ -42,6 +42,8 @@ import { exportCanvas, importCanvases } from "@/features/canvas/transfer";
 import { openProjectStyle } from "@/features/project/ProjectStyleDialog";
 import { ProjectIcon } from "@/features/project/projectIcons";
 import { t } from "@/i18n";
+import { operationTarget } from "@/lib/operations";
+import { sanitizeName } from "@/lib/names";
 import { folderChain, folderName, isFolder, namesAt as namesAtOf, withDescendants } from "@/lib/folders";
 import { confirmAction } from "@/services/confirm";
 import { backend } from "@/services/backend";
@@ -120,6 +122,10 @@ async function namesAround(asset: Asset, inCanvas: boolean, cardId?: ID): Promis
 
 /** 重命名文件；inCanvas 时只改这张卡片（cardId）或这个画布用的那份（见 ownAssetForCanvas），同一层里不能重名 */
 async function renameAsset(asset: Asset, inCanvas: boolean, cardId?: ID) {
+  const operation = operationTarget();
+  await cv().flush();
+  await app().refreshAssets();
+  asset = app().assets.get(asset.id) ?? asset;
   const taken = await namesAround(asset, inCanvas, cardId);
   const name = await promptText(t("重命名文件"), asset.name, {
     selectStem: true,
@@ -127,9 +133,17 @@ async function renameAsset(asset: Asset, inCanvas: boolean, cardId?: ID) {
   });
   if (!name || name === asset.name) return;
   await attempt(t("重命名"), async () => {
-    const target = inCanvas ? await ownAssetForCanvas(asset, cardId) : asset;
-    const renamed = await backend.renameAsset(target, name);
+    if (inCanvas && !operation.valid()) return;
+    const renamed = inCanvas ? await backend.copyAssetAs(asset.id, name) : await backend.renameAsset(asset, name);
     app().addAssets([renamed]);
+    if (inCanvas) {
+      if (!operation.valid()) return;
+      const users = cv().doc?.elements.filter((e) => "assetId" in e && e.assetId === asset.id && (!cardId || e.id === cardId)) ?? [];
+      cv().updateElements(Object.fromEntries(users.map((e) => [e.id, { assetId: renamed.id }])));
+    } else {
+      const id = cv().doc?.canvasId;
+      if (id) { cv().reset(); await cv().load(id); }
+    }
     app().showToast(t("已重命名为「{name}」", { name: renamed.name }));
   });
 }
@@ -240,8 +254,9 @@ function moveToFolderEntry(ids: ID[]): MenuEntry {
 }
 
 export async function renameFolder(f: FolderElement) {
+  const target = operationTarget();
   const label = await promptText(t("重命名文件夹"), f.label, { validate: (v) => folderRenameError(f, v) });
-  if (label !== null && label !== f.label) cv().updateElements({ [f.id]: { label } });
+  if (label !== null && label !== f.label && target.valid()) cv().updateElements({ [f.id]: { label: sanitizeName(label) } });
 }
 
 const alignOptions = (): { mode: AlignMode; label: string; icon: ReactNode }[] => [

@@ -18,6 +18,7 @@ export async function runImport<T>(
   opts: { key?: string; done?: (result: T) => string } = {},
 ): Promise<T | null> {
   const app = useAppStore.getState();
+  const workspace = app.workspace?.path;
   if (opts.key && useImports.getState().tasks.some((task) => task.key === opts.key)) {
     app.showToast(t("这些文件正在导入，请稍候"));
     return null;
@@ -28,6 +29,7 @@ export async function runImport<T>(
     if (opts.done && Date.now() - task.startedAt >= SHOW_PROGRESS_AFTER) app.showToast(opts.done(result));
     return result;
   } finally {
+    if (workspace === useAppStore.getState().workspace?.path) await app.refreshAssets().catch(console.error);
     endImportTask(task.id);
   }
 }

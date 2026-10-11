@@ -47,6 +47,8 @@ export const CARD_COLORS = ["default", "red", "orange", "yellow", "green", "blue
 export type CardColor = (typeof CARD_COLORS)[number];
 
 interface ElementBase {
+  source?: Record<string, unknown>;
+  sourceColor?: string;
   id: ID;
   type: ElementType;
   x: number;
@@ -106,6 +108,12 @@ export interface FolderElement extends ElementBase {
 export type CanvasElement = TextElement | ImageElement | FileElement | LinkElement | FolderElement;
 
 export interface Edge {
+  source?: Record<string, unknown>;
+  fromEnd?: "arrow" | "none";
+  toEnd?: "arrow" | "none";
+  color?: string;
+  fromSide?: "top" | "right" | "bottom" | "left";
+  toSide?: "top" | "right" | "bottom" | "left";
   id: ID;
   fromId: ID;
   toId: ID;
@@ -121,6 +129,7 @@ export interface Viewport {
 
 /** 画布的完整内容。磁盘上以 JSON Canvas 兼容格式保存，见 lib/jsonCanvas.ts */
 export interface CanvasDoc {
+  source?: Record<string, unknown>;
   canvasId: ID;
   elements: CanvasElement[];
   edges: Edge[];

@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import { useT } from "@/i18n";
+import { useDialog } from "./useDialog";
 
 interface PromptOptions {
   /** 只选中扩展名之前的部分（输入文件名时），与资源管理器重命名一致 */
@@ -18,10 +19,21 @@ interface PromptState {
 }
 
 const usePrompt = create<PromptState>(() => ({ prompt: null }));
+const queue: NonNullable<PromptState["prompt"]>[] = [];
+function nextPrompt() { usePrompt.setState({ prompt: queue.shift() ?? null }); }
+export function cancelPrompts() {
+  const current = usePrompt.getState().prompt;
+  const waiting = queue.splice(0);
+  usePrompt.setState({ prompt: null });
+  current?.resolve(null); for (const prompt of waiting) prompt.resolve(null);
+}
 
 /** 弹出单行输入框（用于重命名等）；取消时返回 null */
 export function promptText(title: string, initial = "", opts: PromptOptions = {}): Promise<string | null> {
-  return new Promise((resolve) => usePrompt.setState({ prompt: { title, initial, opts, resolve } }));
+  return new Promise((resolve) => {
+    queue.push({ title, initial, opts, resolve });
+    if (!usePrompt.getState().prompt) nextPrompt();
+  });
 }
 
 export function PromptHost() {
@@ -29,10 +41,12 @@ export function PromptHost() {
   const t = useT();
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialog(dialogRef, !!prompt);
   // 打开后、输入框里已经是初始文字时选中一次
   const needSelect = useRef(false);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!prompt) return;
     setValue(prompt.initial);
     needSelect.current = true;
@@ -52,13 +66,14 @@ export function PromptHost() {
   const error = value.trim() ? (prompt.opts.validate?.(value.trim()) ?? null) : null;
   const finish = (v: string | null) => {
     if (v !== null && error) return;
-    usePrompt.setState({ prompt: null });
+    if (usePrompt.getState().prompt !== prompt) return;
+    nextPrompt();
     prompt.resolve(v === null ? null : v.trim() || null);
   };
 
   return (
     <div className="overlay" onPointerDown={() => finish(null)}>
-      <div className="dialog prompt-dialog" onPointerDown={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={prompt.title} className="dialog prompt-dialog" onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => { e.stopPropagation(); if (!e.nativeEvent.isComposing && e.key === "Escape") finish(null); }}>
         <h3>{prompt.title}</h3>
         {prompt.opts.message && <p className="prompt-message">{prompt.opts.message}</p>}
         <input
@@ -67,6 +82,7 @@ export function PromptHost() {
           aria-invalid={!!error}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
             if (e.key === "Enter") finish(value);
             if (e.key === "Escape") finish(null);
           }}

@@ -5,6 +5,7 @@ import { msg, useT } from "@/i18n";
 import { projectLabel, useAppStore } from "@/store/appStore";
 import type { SearchHit } from "@/types/model";
 import { Highlight } from "./Highlight";
+import { useDialog } from "@/features/menu/useDialog";
 
 const KIND_ICON = { canvas: Shapes, text: Type, file: FileText, image: ImageIcon } as const;
 const KIND_LABEL = { canvas: msg("画布"), text: msg("文本"), file: msg("文件"), image: msg("图中文字") } as const;
@@ -17,14 +18,21 @@ export function SearchPalette() {
   // 当前结果对应的查询词：输入还没停下来时，高亮仍按显示中的结果来
   const [hitsQuery, setHitsQuery] = useState("");
   const [active, setActive] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const request = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialog(dialogRef, true);
 
   useEffect(() => inputRef.current?.focus(), []);
 
   useEffect(() => {
+    request.current++;
     const q = query.trim();
     if (!q) {
       setHits([]);
+      setHasMore(false);
       return;
     }
     let alive = true;
@@ -33,7 +41,8 @@ export function SearchPalette() {
         .search(q)
         .then((r) => {
           if (!alive) return;
-          setHits(r);
+          setHits(r.slice(0, 50));
+          setHasMore(r.length > 50);
           setHitsQuery(q);
           setActive(0);
         })
@@ -46,6 +55,17 @@ export function SearchPalette() {
   }, [query]);
 
   const close = () => useAppStore.getState().setSearchOpen(false);
+  const more = async () => {
+    const version = request.current;
+    setLoadingMore(true);
+    try {
+      const next = await backend.search(hitsQuery, hits.length);
+      if (version !== request.current) return;
+      setHits((previous) => [...previous, ...next.slice(0, 50)]);
+      setHasMore(next.length > 50);
+    } catch (e) { useAppStore.getState().showToast(String(e)); }
+    finally { setLoadingMore(false); }
+  };
   const go = (hit: SearchHit) => {
     close();
     useAppStore.getState().navigate({
@@ -60,7 +80,7 @@ export function SearchPalette() {
 
   return (
     <div className="overlay" onPointerDown={close}>
-      <div className="palette" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="palette" role="dialog" aria-modal="true" aria-label={t("搜索")} ref={dialogRef} onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => { e.stopPropagation(); if (!e.nativeEvent.isComposing && e.key === "Escape") close(); }}>
         <div className="palette-input">
           <Search size={16} />
           <input
@@ -69,6 +89,7 @@ export function SearchPalette() {
             placeholder={t("搜索画布名、卡片文字、文件名、图片中的文字")}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
               if (e.key === "Escape") close();
               else if (e.key === "ArrowDown") {
                 e.preventDefault();
@@ -101,6 +122,7 @@ export function SearchPalette() {
                 </li>
               );
             })}
+            {hasMore && <li><button onClick={() => void more()} disabled={loadingMore || query.trim() !== hitsQuery}>{t("加载更多")}</button></li>}
           </ul>
         )}
       </div>

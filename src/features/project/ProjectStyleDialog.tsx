@@ -1,4 +1,6 @@
 import { Check, X } from "lucide-react";
+import { useRef } from "react";
+import { useDialog } from "@/features/menu/useDialog";
 import { create } from "zustand";
 import { t, useT } from "@/i18n";
 import { useAppStore } from "@/store/appStore";
@@ -14,6 +16,8 @@ export function ProjectStyleDialog() {
   const projectId = useStyleDialog((s) => s.projectId);
   useT();
   const project = useAppStore((s) => s.projects.find((p) => p.id === projectId));
+  const ref = useRef<HTMLDivElement>(null);
+  useDialog(ref, !!project);
   if (!project) return null;
 
   const close = () => useStyleDialog.setState({ projectId: null });
@@ -26,7 +30,7 @@ export function ProjectStyleDialog() {
 
   return (
     <div className="overlay" onPointerDown={close} onKeyDown={(e) => e.key === "Escape" && close()}>
-      <div className="dialog style-dialog" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="dialog style-dialog" role="dialog" aria-modal="true" aria-label={project.name} ref={ref} onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") close(); }}>
         <header>
           <ProjectIcon project={project} size={18} />
           <h3>{project.name}</h3>

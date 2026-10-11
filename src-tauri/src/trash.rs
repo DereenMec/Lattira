@@ -71,10 +71,14 @@ fn file_size(path: &Path) -> i64 {
 /// 早期版本删除文件时只把文件移进 trash/assets/，没有留下记录；补登记，让它们也能恢复
 fn adopt_orphans(ws: &Workspace) -> Result<()> {
     let dir = trash_dir(ws).join("assets");
-    let Ok(entries) = fs::read_dir(&dir) else { return Ok(()) };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Ok(());
+    };
     let known: HashSet<String> = {
         let mut stmt = ws.conn.prepare("SELECT trash_file FROM trashed_assets")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
         rows
     };
     for entry in entries.filter_map(|e| e.ok()) {
@@ -84,9 +88,14 @@ fn adopt_orphans(ws: &Workspace) -> Result<()> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let mime = mime_guess::from_path(&name).first_or_octet_stream().essence_str().to_string();
+        let mime = mime_guess::from_path(&name)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string();
         let (width, height) = if mime.starts_with("image/") {
-            imagesize::size(&path).map(|s| (Some(s.width as i64), Some(s.height as i64))).unwrap_or((None, None))
+            imagesize::size(&path)
+                .map(|s| (Some(s.width as i64), Some(s.height as i64)))
+                .unwrap_or((None, None))
         } else {
             (None, None)
         };
@@ -161,54 +170,96 @@ pub async fn list_trash(state: State<'_, AppState>) -> Result<Vec<TrashItem>> {
 fn restore_canvas(ws: &Workspace, id: &str) -> Result<CanvasMeta> {
     let (project_id, title): (String, String) = ws
         .conn
-        .query_row("SELECT project_id, title FROM canvases WHERE id = ?1 AND deleted_at IS NOT NULL", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+        .query_row(
+            "SELECT project_id, title FROM canvases WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?
         .ok_or_else(|| Error::NotFound("回收站中的画布", id.into()))?;
     let src = canvas_trash_file(ws, id);
     if !src.is_file() {
-        return Err(Error::Invalid(format!("回收站里找不到「{title}」的画布文件")));
+        return Err(Error::Invalid(format!(
+            "回收站里找不到「{title}」的画布文件"
+        )));
     }
-    let archived: Option<bool> =
-        ws.conn.query_row("SELECT archived FROM projects WHERE id = ?1", [&project_id], |r| r.get(0)).optional()?;
+    let archived: Option<bool> = ws
+        .conn
+        .query_row(
+            "SELECT archived FROM projects WHERE id = ?1",
+            [&project_id],
+            |r| r.get(0),
+        )
+        .optional()?;
     let project_id = if archived == Some(false) {
         project_id
     } else {
-        ws.conn.query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| r.get(0))?
+        ws.conn
+            .query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| {
+                r.get(0)
+            })?
     };
     // 删除之后项目里又有了同名画布：恢复的这个加上「(2)」
     let title = commands::unique_canvas_title(&ws.conn, &project_id, &title, Some(id))?;
-    let dir = ws.root.join("projects").join(commands::project_dir(&ws.conn, &project_id)?);
+    let dir = ws
+        .root
+        .join("projects")
+        .join(commands::project_dir(&ws.conn, &project_id)?);
     fs::create_dir_all(&dir)?;
     let dest = files::unique_path(&dir, &files::sanitize(&title), "canvas", None);
-    fs::rename(&src, &dest)?;
-    // 搜索索引与资源引用由前端重新保存一次画布时重建
+    let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&src)?)?;
+    for node in doc["nodes"].as_array_mut().into_iter().flatten() {
+        if let Some(asset) = node
+            .pointer("/lattira/assetId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            if commands::get_asset(&ws.conn, "id", &asset)?.is_none() {
+                let trashed: bool = ws.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM trashed_assets WHERE id=?1)",
+                    [&asset],
+                    |r| r.get(0),
+                )?;
+                if trashed {
+                    restore_asset(ws, &asset)?;
+                }
+            }
+            if let Some(loaded) = commands::get_asset(&ws.conn, "id", &asset)? {
+                node["file"] = serde_json::json!(loaded.path);
+                ws.conn
+                    .execute("UPDATE assets SET trash_snapshot=0 WHERE id=?1", [asset])?;
+            }
+        }
+    }
+    files::write_atomic(&src, serde_json::to_string_pretty(&doc)?.as_bytes())?;
+    crate::journal::rename(&src, &dest)?;
+    // 在同一事务中重建搜索索引与资源引用
     ws.conn.execute(
         "UPDATE canvases SET deleted_at = NULL, project_id = ?2, file = ?3, title = ?4 WHERE id = ?1",
         params![id, project_id, ws.rel(&dest), title],
     )?;
+    commands::index_document(ws, id, &doc)?;
     commands::get_canvas(&ws.conn, id)
 }
 
-/// 尽量放回原来的位置；同样内容的文件已经重新导入过时，直接用现有的那份
+/// 尽量放回原来的位置，并保留原 ID，避免破坏回收站画布里的引用
 fn restore_asset(ws: &Workspace, id: &str) -> Result<Asset> {
     let (hash, name, original, trash_file): (String, String, String, String) = ws
         .conn
-        .query_row("SELECT hash, name, original_path, trash_file FROM trashed_assets WHERE id = ?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
+        .query_row(
+            "SELECT hash, name, original_path, trash_file FROM trashed_assets WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
         .optional()?
         .ok_or_else(|| Error::NotFound("回收站中的文件", id.into()))?;
     let src = ws.abs(&trash_file);
 
-    if let Some(existing) = commands::get_asset(&ws.conn, "hash", &hash)? {
-        if src.exists() {
-            fs::remove_file(&src)?;
-        }
-        ws.conn.execute("DELETE FROM trashed_assets WHERE id = ?1", [id])?;
-        return Ok(existing);
-    }
+    let hash = if commands::get_asset(&ws.conn, "hash", &hash)?.is_some() {
+        format!("{hash}:{id}")
+    } else {
+        hash
+    };
     if !src.is_file() {
         return Err(Error::Invalid(format!("回收站里找不到文件「{name}」")));
     }
@@ -219,18 +270,22 @@ fn restore_asset(ws: &Workspace, id: &str) -> Result<Asset> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::rename(&src, &dest)?;
+    crate::journal::rename(&src, &dest)?;
     ws.conn.execute(
         "INSERT INTO assets (id, hash, path, name, mime, size, width, height, imported_at, ocr_text)
-         SELECT id, hash, ?2, name, mime, size, width, height, imported_at, ocr_text FROM trashed_assets WHERE id = ?1",
-        params![id, ws.rel(&dest)],
+         SELECT id, ?3, ?2, name, mime, size, width, height, imported_at, ocr_text FROM trashed_assets WHERE id = ?1",
+        params![id, ws.rel(&dest), hash],
     )?;
-    ws.conn.execute("DELETE FROM trashed_assets WHERE id = ?1", [id])?;
+    ws.conn
+        .execute("DELETE FROM trashed_assets WHERE id = ?1", [id])?;
     commands::get_asset(&ws.conn, "id", id)?.ok_or_else(|| Error::NotFound("资源", id.into()))
 }
 
 #[tauri::command]
-pub async fn restore_trash(state: State<'_, AppState>, items: Vec<TrashRef>) -> Result<RestoreResult> {
+pub async fn restore_trash(
+    state: State<'_, AppState>,
+    items: Vec<TrashRef>,
+) -> Result<RestoreResult> {
     state.with(|ws| {
         let mut out = RestoreResult::default();
         for item in &items {
@@ -244,7 +299,7 @@ pub async fn restore_trash(state: State<'_, AppState>, items: Vec<TrashRef>) -> 
 }
 
 fn remove_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
+    match crate::journal::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
@@ -256,28 +311,52 @@ fn purge(ws: &mut Workspace, item: &TrashRef) -> Result<()> {
         TrashKind::Canvas => {
             let trashed: Option<i64> = ws
                 .conn
-                .query_row("SELECT deleted_at FROM canvases WHERE id = ?1", [&item.id], |r| r.get(0))
+                .query_row(
+                    "SELECT deleted_at FROM canvases WHERE id = ?1",
+                    [&item.id],
+                    |r| r.get(0),
+                )
                 .optional()?
                 .flatten();
             if trashed.is_none() {
                 return Ok(());
             }
             remove_if_exists(&canvas_trash_file(ws, &item.id))?;
-            let tx = ws.conn.transaction()?;
+            let tx = ws.conn.savepoint()?;
             for table in ["canvas_days", "edit_events", "asset_refs", "element_text"] {
-                tx.execute(&format!("DELETE FROM {table} WHERE canvas_id = ?1"), [&item.id])?;
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE canvas_id = ?1"),
+                    [&item.id],
+                )?;
             }
             tx.execute("DELETE FROM canvases WHERE id = ?1", [&item.id])?;
             tx.commit()?;
+            // Snapshot bodies that belonged only to this trashed canvas can now be reclaimed.
+            let unused: Vec<(String, String)> = {
+                let mut stmt=ws.conn.prepare("SELECT id,path FROM assets WHERE trash_snapshot=1 AND NOT EXISTS(SELECT 1 FROM asset_refs WHERE asset_id=assets.id)")?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                rows
+            };
+            for (id, path) in unused {
+                remove_if_exists(&ws.abs(&path))?;
+                ws.conn.execute("DELETE FROM assets WHERE id=?1", [id])?;
+            }
         }
         TrashKind::Asset => {
             let file: Option<String> = ws
                 .conn
-                .query_row("SELECT trash_file FROM trashed_assets WHERE id = ?1", [&item.id], |r| r.get(0))
+                .query_row(
+                    "SELECT trash_file FROM trashed_assets WHERE id = ?1",
+                    [&item.id],
+                    |r| r.get(0),
+                )
                 .optional()?;
             if let Some(file) = file {
                 remove_if_exists(&ws.abs(&file))?;
-                ws.conn.execute("DELETE FROM trashed_assets WHERE id = ?1", [&item.id])?;
+                ws.conn
+                    .execute("DELETE FROM trashed_assets WHERE id = ?1", [&item.id])?;
             }
         }
     }
@@ -294,20 +373,38 @@ pub async fn purge_trash(state: State<'_, AppState>, items: Vec<TrashRef>) -> Re
 pub async fn empty_trash(state: State<'_, AppState>) -> Result<()> {
     state.with(|ws| {
         let canvases: Vec<String> = {
-            let mut stmt = ws.conn.prepare("SELECT id FROM canvases WHERE deleted_at IS NOT NULL")?;
-            let rows = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let mut stmt = ws
+                .conn
+                .prepare("SELECT id FROM canvases WHERE deleted_at IS NOT NULL")?;
+            let rows = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
             rows
         };
         let assets: Vec<String> = {
             let mut stmt = ws.conn.prepare("SELECT id FROM trashed_assets")?;
-            let rows = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let rows = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
             rows
         };
         for id in canvases {
-            purge(ws, &TrashRef { kind: TrashKind::Canvas, id })?;
+            purge(
+                ws,
+                &TrashRef {
+                    kind: TrashKind::Canvas,
+                    id,
+                },
+            )?;
         }
         for id in assets {
-            purge(ws, &TrashRef { kind: TrashKind::Asset, id })?;
+            purge(
+                ws,
+                &TrashRef {
+                    kind: TrashKind::Asset,
+                    id,
+                },
+            )?;
         }
         let dir = trash_dir(ws);
         if dir.exists() {
@@ -330,7 +427,11 @@ mod tests {
     }
 
     fn inbox(ws: &Workspace) -> String {
-        ws.conn.query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| r.get(0)).unwrap()
+        ws.conn
+            .query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
     }
 
     /// 模拟 delete_canvas：文件移进回收站并标记删除
@@ -366,11 +467,30 @@ mod tests {
         assert!(!canvas_trash_file(&ws, &a).exists());
 
         // 不在回收站里的画布不会被永久删除
-        purge(&mut ws, &TrashRef { kind: TrashKind::Canvas, id: a.clone() }).unwrap();
+        purge(
+            &mut ws,
+            &TrashRef {
+                kind: TrashKind::Canvas,
+                id: a.clone(),
+            },
+        )
+        .unwrap();
         assert!(commands::get_canvas(&ws.conn, &a).is_ok());
 
-        purge(&mut ws, &TrashRef { kind: TrashKind::Canvas, id: b.clone() }).unwrap();
-        let left: i64 = ws.conn.query_row("SELECT COUNT(*) FROM canvases WHERE id = ?1", [&b], |r| r.get(0)).unwrap();
+        purge(
+            &mut ws,
+            &TrashRef {
+                kind: TrashKind::Canvas,
+                id: b.clone(),
+            },
+        )
+        .unwrap();
+        let left: i64 = ws
+            .conn
+            .query_row("SELECT COUNT(*) FROM canvases WHERE id = ?1", [&b], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(left, 0);
         assert!(!canvas_trash_file(&ws, &b).exists());
         drop(ws);
@@ -396,22 +516,38 @@ mod tests {
                 params![asset.id, ws.rel(&dest)],
             )
             .unwrap();
-        ws.conn.execute("DELETE FROM assets WHERE id = ?1", [&asset.id]).unwrap();
+        ws.conn
+            .execute("DELETE FROM assets WHERE id = ?1", [&asset.id])
+            .unwrap();
 
         // 早期版本留下的、没有记录的文件
         fs::write(trash_dir(&ws).join("assets").join("旧图.png"), "png").unwrap();
         adopt_orphans(&ws).unwrap();
         adopt_orphans(&ws).unwrap();
-        let n: i64 = ws.conn.query_row("SELECT COUNT(*) FROM trashed_assets", [], |r| r.get(0)).unwrap();
+        let n: i64 = ws
+            .conn
+            .query_row("SELECT COUNT(*) FROM trashed_assets", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 2);
 
+        // The same bytes may have been imported again while the original was trashed.
+        let duplicate = commands::import_file(&ws, &src).unwrap();
+        assert_ne!(duplicate.id, asset.id);
         let restored = restore_asset(&ws, &asset.id).unwrap();
         assert_eq!(restored.id, asset.id);
-        assert_eq!(restored.path, asset.path);
-        assert!(original.is_file());
+        assert!(ws.abs(&restored.path).is_file());
+        assert!(commands::get_asset(&ws.conn, "id", &duplicate.id)
+            .unwrap()
+            .is_some());
 
-        let orphan: String =
-            ws.conn.query_row("SELECT id FROM trashed_assets WHERE name = '旧图.png'", [], |r| r.get(0)).unwrap();
+        let orphan: String = ws
+            .conn
+            .query_row(
+                "SELECT id FROM trashed_assets WHERE name = '旧图.png'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let restored = restore_asset(&ws, &orphan).unwrap();
         assert!(restored.path.starts_with("assets/"));
         assert!(ws.abs(&restored.path).is_file());

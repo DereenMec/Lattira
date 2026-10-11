@@ -17,7 +17,7 @@ export function WelcomeScreen() {
       <p className="hint">
         {backend.kind === "tauri"
           ? t("工作区就是你磁盘上的一个普通文件夹，所有画布和导入的文件都保存在里面。")
-          : t("当前在浏览器中运行：数据只保存在本浏览器里，导入的文件刷新后不会保留。")}
+          : t("当前在浏览器中运行：画布与导入的文件保存在本浏览器里；清除网站数据会将它们删除。")}
       </p>
       <button className="btn ghost welcome-lang" onClick={() => setLocale(locale === "zh" ? "en" : "zh")}>
         {locale === "zh" ? "English" : "中文"}

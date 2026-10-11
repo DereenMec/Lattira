@@ -49,15 +49,17 @@ export async function installUpdate(beforeInstall: () => Promise<void>) {
   let received = 0;
   let total: number | undefined;
   try {
-    await beforeInstall();
     setStatus({ kind: "downloading", version, received });
-    await update.downloadAndInstall((event) => {
+    await update.download((event) => {
       if (event.event === "Started") total = event.data.contentLength;
       else if (event.event === "Progress") {
         received += event.data.chunkLength;
         setStatus({ kind: "downloading", version, received, total });
-      } else setStatus({ kind: "installing", version });
+      }
     });
+    await beforeInstall();
+    setStatus({ kind: "installing", version });
+    await update.install();
     // Windows 上安装程序会自行关闭并重新打开栖页，其他情况手动重启
     await relaunch();
   } catch (e) {

@@ -17,7 +17,7 @@
 
 ## 开发环境
 
-- Node.js 20+
+- Node.js 22.13+（推荐 24 LTS；回归测试使用内置 TypeScript 类型剥离）
 - Rust（stable，MSVC 工具链）
 - Visual Studio 生成工具（勾选「使用 C++ 的桌面开发」）
 - WebView2 运行时（Windows 11 自带）
@@ -25,7 +25,8 @@
 ```bash
 npm install
 npm run tauri dev     # 启动桌面端（会自动启动 Vite）
-npm run dev           # 只在浏览器里调界面，数据存在 localStorage
+npm run dev           # 只在浏览器里调界面：元数据在 localStorage，文件在 IndexedDB
+npm test              # 保存、命名、格式兼容与浏览器存储回归测试
 npm run typecheck     # 前端类型检查
 npm run i18n:check    # 检查英文翻译是否齐全
 npm run build && npx vite preview --port 5480   # 生产构建，浏览器打开 http://localhost:5480/?perf 可做性能测试
@@ -49,7 +50,7 @@ src/
 ├─ services/
 │  ├─ backend.ts           前端访问存储层的唯一接口
 │  ├─ tauriBackend.ts      桌面端实现：调用 Rust 命令
-│  ├─ browserBackend.ts    浏览器预览实现：localStorage
+│  ├─ browserBackend.ts    浏览器预览实现：localStorage + IndexedDB
 │  ├─ desktop.ts           托盘、全局快捷键、窗口主题（仅桌面端）
 │  └─ updater.ts           在线更新
 ├─ store/
@@ -63,6 +64,8 @@ src-tauri/src/
 ├─ trash.rs                回收站：列出、恢复、永久删除
 ├─ desktop.rs              托盘、关闭时最小化到托盘、呼出主界面的全局快捷键
 ├─ transfer.rs             画布导出为画布包（.zip）与导入（画布包或 .canvas）
+├─ journal.rs              文件修改撤销日志与 SQLite 提交标记，启动时恢复中断的事务
+├─ thumbnails.rs           Windows 图像解码器生成 512 像素缩略图并缓存
 ├─ ocr.rs                  图片文字识别（后台线程，结果用于搜索）
 ├─ shellnew.rs             读取 Windows 右键菜单「新建」的文件类型与模板（注册表 ShellNew）
 ├─ workspace.rs            工作区的打开与初始化、应用设置
@@ -76,7 +79,10 @@ src-tauri/src/
 我的工作区/
 ├─ .lattira/
 │  ├─ lattira.db           元数据、搜索索引、编辑记录（日历数据）
-│  └─ trash/               回收站：删除的画布（<id>.canvas）与文件（assets/）
+│  ├─ trash/               回收站：删除的画布（<id>.canvas）与文件（assets/）
+│  ├─ transactions/        未完成操作的持久化撤销日志（打开工作区时自动恢复）
+│  ├─ thumbnails/          按内容指纹缓存的缩略图，可重新生成
+│  └─ links/               网页预览图与图标，画布包会一并携带
 ├─ projects/
 │  ├─ 未分类/
 │  └─ 竞品分析/竞品对比.canvas
@@ -122,3 +128,14 @@ npm run release:manifest -- notes.md
 
 - [ ] 文件卡片的内置预览（PDF 等）
 - [ ] 大画布：越过预渲染区域时分批挂载
+
+## 可靠性与兼容性
+
+v0.8.0 的修复范围和验证记录见 [代码审视修复清单](REVIEW-FIXES-v0.8.0.md)。
+保存失败会保留草稿并阻止切换画布、工作区或退出；界面提供重试，以及另存恢复副本后重新打开的操作。
+磁盘画布被外部程序改过时不会直接覆盖，会留下 `.conflict.canvas` 副本以供合并。
+删除画布时为引用的资源创建独立快照，回收站画布不受资源库改名、编辑或清理影响；恢复同内容文件仍保留原 ID。
+
+工作区数据库升级到第 6 版，新增全文搜索索引、OCR 重试状态、回收站快照标记和导入预留记录。
+首次打开旧工作区会为仍可读取的回收站资源创建快照；旧版本中已经丢失的文件无法凭空恢复。
+网页预览和缩略图缓存可以重建，`transactions` 的恢复日志则在操作完成前承担文件回滚用途。

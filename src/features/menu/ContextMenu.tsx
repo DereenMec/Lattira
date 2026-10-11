@@ -47,11 +47,16 @@ export function useSuppressNativeMenu() {
   }, []);
 }
 
-function MenuList({ items, x, y, onClose }: { items: MenuEntry[]; x: number; y: number; onClose(): void }) {
+function MenuList({ items, x, y, onClose, onBack }: { items: MenuEntry[]; x: number; y: number; onClose(): void; onBack?(): void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
   const [open, setOpen] = useState<number | null>(null);
   const [subAnchor, setSubAnchor] = useState<DOMRect | null>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    ref.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+    return () => { if (previous?.isConnected) previous.focus(); };
+  }, []);
 
   // 靠近窗口边缘时向内翻转
   useLayoutEffect(() => {
@@ -67,7 +72,16 @@ function MenuList({ items, x, y, onClose }: { items: MenuEntry[]; x: number; y: 
 
   return (
     <>
-      <div ref={ref} className="ctx-menu" style={pos} role="menu" onContextMenu={(e) => e.preventDefault()}>
+      <div ref={ref} className="ctx-menu" style={pos} role="menu" onContextMenu={(e) => e.preventDefault()} onKeyDown={(e) => {
+        e.stopPropagation();
+        const buttons = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault(); buttons[(index + (e.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
+        } else if (e.key === "ArrowRight") { e.preventDefault(); (document.activeElement as HTMLButtonElement)?.click(); }
+        else if (e.key === "ArrowLeft" || e.key === "Escape") { e.preventDefault(); (onBack ?? onClose)(); }
+        else if (e.key === "Tab") { e.preventDefault(); onClose(); }
+      }}>
         {items.map((item, i) =>
           item === "separator" ? (
             <div key={i} className="ctx-sep" />
@@ -88,8 +102,10 @@ function MenuList({ items, x, y, onClose }: { items: MenuEntry[]; x: number; y: 
                   setSubAnchor(e.currentTarget.getBoundingClientRect());
                 } else setOpen(null);
               }}
-              onClick={() => {
-                if (item.children) return;
+              aria-haspopup={item.children ? "menu" : undefined}
+              aria-expanded={item.children ? open === i : undefined}
+              onClick={(e) => {
+                if (item.children) { setOpen(i); setSubAnchor(e.currentTarget.getBoundingClientRect()); return; }
                 onClose();
                 item.onSelect?.();
               }}
@@ -103,7 +119,7 @@ function MenuList({ items, x, y, onClose }: { items: MenuEntry[]; x: number; y: 
         )}
       </div>
       {sub && sub !== "separator" && sub.children && subAnchor && (
-        <MenuList items={sub.children} x={subAnchor.right - 4} y={subAnchor.top - 5} onClose={onClose} />
+        <MenuList items={sub.children} x={subAnchor.right - 4} y={subAnchor.top - 5} onClose={onClose} onBack={() => setOpen(null)} />
       )}
     </>
   );

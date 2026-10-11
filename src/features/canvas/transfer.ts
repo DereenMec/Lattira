@@ -20,12 +20,15 @@ export async function exportCanvas(canvas: CanvasMeta) {
 /** 导入到项目；只导入了一个画布时直接打开它 */
 export async function importCanvases(projectId: ID) {
   const app = useAppStore.getState();
+  const workspace = app.workspace?.path;
   try {
     const imported = await backend.importCanvases(projectId);
+    if (workspace !== useAppStore.getState().workspace?.path) return;
     if (imported.length === 0) return;
     await app.refreshAssets();
     const metas: CanvasMeta[] = [];
     for (const meta of imported) metas.push(await reindexCanvas(meta.id).catch(() => meta));
+    if (workspace !== useAppStore.getState().workspace?.path) return;
     useAppStore.setState((s) => ({ canvases: [...s.canvases, ...metas] }));
     await app.refreshAssets();
     if (metas.length === 1) app.navigate({ kind: "canvas", canvasId: metas[0].id });
@@ -33,5 +36,12 @@ export async function importCanvases(projectId: ID) {
     app.showToast(t("已导入 {n} 个画布", { n: metas.length }));
   } catch (e) {
     app.showToast(t("导入失败：{error}", { error: String(e) }));
+  } finally {
+    if (workspace === useAppStore.getState().workspace?.path) {
+      const canvases = await backend.listCanvases();
+      if (workspace !== useAppStore.getState().workspace?.path) return;
+      useAppStore.setState({ canvases });
+      await app.refreshAssets();
+    }
   }
 }

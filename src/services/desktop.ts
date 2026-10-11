@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "@/i18n";
 import { backend } from "./backend";
+import { useAppStore } from "@/store/appStore";
 
 export const isDesktop = backend.kind === "tauri";
 
@@ -36,8 +37,10 @@ export function handleQuit(beforeQuit: () => Promise<void>): () => void {
   void listen("quit-requested", async () => {
     try {
       await beforeQuit();
-    } finally {
       await invoke<void>("exit_app");
+    } catch (error) {
+      await invoke<void>("cancel_quit");
+      useAppStore.getState().showToast(t("保存失败：{error}", { error: String(error) }));
     }
   }).then((fn) => {
     if (cancelled) fn();

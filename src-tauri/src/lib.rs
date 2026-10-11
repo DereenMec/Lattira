@@ -4,9 +4,11 @@ mod db;
 mod desktop;
 mod error;
 mod files;
+mod journal;
 mod link;
 mod ocr;
 mod shellnew;
+mod thumbnails;
 mod transfer;
 mod trash;
 mod workspace;
@@ -16,7 +18,9 @@ use workspace::AppState;
 pub fn run() {
     tauri::Builder::default()
         // 必须最先注册：再次启动程序时只把已运行的窗口调出来
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| desktop::show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            desktop::show_main(app)
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(desktop::global_shortcut_plugin())
@@ -38,10 +42,13 @@ pub fn run() {
             commands::delete_canvas,
             commands::load_canvas,
             commands::save_canvas,
+            commands::save_recovery,
             commands::import_paths,
             commands::import_tree,
             commands::import_bytes,
+            commands::import_blob_chunk,
             commands::list_assets,
+            thumbnails::thumbnail_asset,
             commands::open_asset,
             commands::check_asset_changes,
             commands::fork_asset_for_canvas,
@@ -71,6 +78,7 @@ pub fn run() {
             desktop::set_close_to_tray,
             desktop::set_tray_labels,
             desktop::exit_app,
+            desktop::cancel_quit,
         ])
         .run(tauri::generate_context!())
         .expect("启动栖页失败");

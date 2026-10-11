@@ -6,6 +6,7 @@
  * 只在其他画布也用着时才复制。资源库不属于任何画布，从那里打开、重命名的是原来那份。
  */
 import { t } from "@/i18n";
+import { operationTarget } from "@/lib/operations";
 import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
@@ -16,12 +17,16 @@ import type { Asset, ID } from "@/types/model";
  * （不进撤销历史，撤销其他操作时也不会指回去）
  */
 export async function ownAssetForCanvas(asset: Asset, cardId?: ID): Promise<Asset> {
+  const target = operationTarget();
   const s = useCanvasStore.getState();
   const doc = s.doc;
   if (!doc) return asset;
   const users = doc.elements.filter((el) => "assetId" in el && el.assetId === asset.id);
   const sharedHere = !!cardId && users.some((el) => el.id !== cardId);
+  await s.flush();
+  if (!target.valid()) throw new Error(t("操作已取消"));
   const own = await backend.forkAssetForCanvas(asset.id, doc.canvasId, sharedHere);
+  if (!target.valid()) throw new Error(t("操作已取消"));
   if (own.id === asset.id) return asset;
   useAppStore.getState().addAssets([own]);
   const repoint = cardId ? users.filter((el) => el.id === cardId) : users;
