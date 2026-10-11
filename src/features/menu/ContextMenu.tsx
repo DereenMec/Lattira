@@ -4,6 +4,8 @@ import { create } from "zustand";
 
 export interface MenuAction {
   label: string;
+  /** 完整路径等长文字需要换行，不能省略末尾的目标。 */
+  wrapLabel?: boolean;
   icon?: ReactNode;
   /** 右侧显示的快捷键提示 */
   hint?: string;
@@ -87,7 +89,7 @@ function MenuList({ items, x, y, onClose, onBack }: { items: MenuEntry[]; x: num
             <div key={i} className="ctx-sep" />
           ) : item.render ? (
             <div key={i} className="ctx-custom">
-              <span className="ctx-label">{item.label}</span>
+              <span className={`ctx-label${item.wrapLabel ? " is-path" : ""}`} title={item.label}>{item.label}</span>
               {item.render(onClose)}
             </div>
           ) : (

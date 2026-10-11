@@ -1398,7 +1398,7 @@ kbd {
   gap: 14px;
 }
 .asset-card {
-  height: 214px;
+  height: 272px;
   display: flex;
   flex-direction: column;
   text-align: left;
@@ -1412,6 +1412,8 @@ kbd {
 }
 .asset-thumb {
   height: 130px;
+  flex-shrink: 0;
+  overflow: hidden;
   display: grid;
   place-items: center;
   background: var(--canvas-bg);
@@ -1801,6 +1803,11 @@ mark.hit {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ctx-label.is-path {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
 .ctx-hint {
   font-size: 11.5px;
   color: var(--ink-3);
@@ -1938,6 +1945,8 @@ mark.hit {
   height: 64px;
 }
 .asset-thumb img.asset-type-icon {
+  width: 64px;
+  height: 64px;
   object-fit: contain;
 }
 
@@ -2033,7 +2042,7 @@ mark.hit {
   color: var(--ink-2);
 }
 .asset-table tbody tr {
-  height: 32px;
+  height: 72px;
   cursor: default;
 }
 .asset-table tbody tr:hover {
@@ -2076,12 +2085,23 @@ mark.hit {
 .asset-table td.col-location .is-unused {
   color: var(--warn);
 }
-/* 文件所在的项目 › 画布：点击打开那个画布 */
+/* 完整位置路径：长路径换行并可滚动，保留固定行高以支持列表虚拟化。 */
 .asset-location {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   min-width: 0;
+}
+.location-path {
+  width: 100%;
+  min-width: 0;
+  max-height: 54px;
+  overflow: auto;
+  line-height: 18px;
+}
+.asset-table .location-path {
+  max-height: 36px;
 }
 .asset-location .link-btn {
   min-width: 0;
@@ -2090,9 +2110,10 @@ mark.hit {
   background: none;
   color: var(--ink-2);
   font: inherit;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  line-height: inherit;
   cursor: pointer;
 }
 .asset-location .link-btn:hover {
@@ -2101,7 +2122,18 @@ mark.hit {
 }
 .loc-more {
   flex: none;
+  align-self: flex-end;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  line-height: 18px;
   color: var(--ink-3);
+  cursor: pointer;
+}
+.loc-more:hover {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 /* 窄窗口下：页头换行而不是把文字挤断；表格保底宽度，超出时横向滚动 */

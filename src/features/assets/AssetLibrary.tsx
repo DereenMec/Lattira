@@ -5,7 +5,7 @@ import { useVirtualRows } from "@/lib/useVirtualRows";
 import { modalOpen } from "@/lib/operations";
 import { AssetImage } from "./AssetImage";
 import { assetEntries } from "@/features/menu/menus";
-import { msg, t, useT } from "@/i18n";
+import { msg, t, useLocale, useT } from "@/i18n";
 import { formatRelative } from "@/lib/date";
 import { fileIconUrl } from "@/lib/fileIcons";
 import { fileExtension, formatBytes, isImageMime } from "@/lib/format";
@@ -14,6 +14,7 @@ import { confirmAction } from "@/services/confirm";
 import { projectLabel, useAppStore } from "@/store/appStore";
 import { dropCanvasCache, useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasMeta, ID, Project } from "@/types/model";
+import { loadLocationIndexes, type AssetLocation, type LocationIndex } from "./assetLocations";
 
 type Filter = "all" | "image" | "document" | "unused";
 type Layout = "grid" | "list";
@@ -34,44 +35,69 @@ const COLUMNS: { key: SortKey; label: string; className: string }[] = [
   { key: "location", label: msg("所在位置"), className: "col-location" },
 ];
 
-/** 文件所在的一个画布：项目 › 画布 */
-interface Location {
-  canvasId: ID;
-  label: string;
-}
-
-/** 文件在哪些画布上（按项目、画布名排序）；画布已删除或不在列表里的不算 */
-function locationsOf(a: Asset, canvases: ReadonlyMap<ID, CanvasMeta>, projects: ReadonlyMap<ID, Project>): Location[] {
+/** 完整位置，按路径排序；画布已删除或不在列表里的不算。 */
+function locationsOf(
+  a: Asset,
+  canvases: ReadonlyMap<ID, CanvasMeta>,
+  projects: ReadonlyMap<ID, Project>,
+  indexes: ReadonlyMap<ID, LocationIndex | null>,
+): AssetLocation[] {
   return a.canvasIds
     .flatMap((id) => {
       const c = canvases.get(id);
       if (!c) return [];
       const p = projects.get(c.projectId);
-      return [{ canvasId: id, label: `${p ? projectLabel(p) : ""} › ${c.title}` }];
+      const base = [p ? projectLabel(p) : "", c.title].filter(Boolean);
+      const index = indexes.get(id);
+      if (!index) {
+        const status = indexes.has(id) ? t("无法读取路径") : t("正在读取路径…");
+        return [{ canvasId: id, label: [...base, status].join(" › ") }];
+      }
+      return (index.get(a.id) ?? []).map((occurrence) => ({
+        canvasId: id,
+        elementId: occurrence.elementId,
+        label: [...base, ...occurrence.folders, a.name].join(" › "),
+      }));
     })
     .sort((x, y) => x.label.localeCompare(y.label, "zh-CN"));
 }
 
 /** 打开文件所在的画布，并定位到用这个文件的卡片 */
-const reveal = (a: Asset, canvasId: ID) => useAppStore.getState().navigate({ kind: "canvas", canvasId, focusAssetId: a.id });
+const reveal = (a: Asset, location: AssetLocation) => useAppStore.getState().navigate({
+  kind: "canvas",
+  canvasId: location.canvasId,
+  ...(location.elementId ? { focusElementId: location.elementId } : { focusAssetId: a.id }),
+});
 
-/** 位置一栏：第一个画布（可点击跳过去），还有其他画布时显示「等 N 个画布」，悬停看全部 */
-function LocationCell({ asset, locations }: { asset: Asset; locations: Location[] }) {
+/** 长路径自动换行、可滚动查看；每个引用位置均可单独跳转。 */
+function LocationCell({ asset, locations }: { asset: Asset; locations: AssetLocation[] }) {
   const t = useT();
   if (locations.length === 0) return <span className="is-unused">{asset.refCount ? t("回收站中的画布正在引用") : t("未被引用")}</span>;
   return (
     <span className="asset-location" title={locations.map((l) => l.label).join("\n")}>
-      <button
-        className="link-btn"
-        onClick={(e) => {
-          e.stopPropagation();
-          reveal(asset, locations[0].canvasId);
-        }}
-        onDoubleClick={(e) => e.stopPropagation()}
-      >
-        {locations[0].label}
-      </button>
-      {locations.length > 1 && <span className="loc-more">{t("等 {n} 个画布", { n: locations.length })}</span>}
+      <span className="location-path">
+        <button
+          className="link-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            reveal(asset, locations[0]);
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          {locations[0].label}
+        </button>
+      </span>
+      {locations.length > 1 && (
+        <button
+          className="loc-more"
+          onDoubleClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            openContextMenu(e, locations.map((l) => ({ label: l.label, wrapLabel: true, onSelect: () => reveal(asset, l) })));
+          }}
+        >
+          {t("另 {n} 个位置", { n: locations.length - 1 })}
+        </button>
+      )}
     </span>
   );
 }
@@ -83,8 +109,8 @@ const matchesFilter = (a: Asset, f: Filter) =>
 
 const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, "");
 
-/** 搜索文件名、扩展名、图片中识别出的文字和所在的项目、画布 */
-const matchesQuery = (a: Asset, q: string, where: Location[]) =>
+/** 搜索文件名、扩展名、图片中识别出的文字和完整位置路径。 */
+const matchesQuery = (a: Asset, q: string, where: AssetLocation[]) =>
   !q || normalize(`${a.name}${a.ocrText ?? ""}${where.map((l) => l.label).join("")}`).includes(q);
 
 const typeLabel = (a: Asset) => {
@@ -107,6 +133,9 @@ export function AssetLibrary() {
   const assets = useAppStore((s) => s.assets);
   const canvasList = useAppStore((s) => s.canvases);
   const projectList = useAppStore((s) => s.projects);
+  const workspacePath = useAppStore((s) => s.workspace?.path);
+  const locale = useLocale((s) => s.locale);
+  const [indexes, setIndexes] = useState<ReadonlyMap<ID, LocationIndex | null>>(new Map());
   const [filter, setFilter] = useState<Filter>("all");
   const [layout, setLayout] = useState<Layout>(readLayout);
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "importedAt", desc: true });
@@ -128,11 +157,31 @@ export function AssetLibrary() {
   };
 
   const all = useMemo(() => [...assets.values()], [assets]);
+  const referencedIds = useMemo(() => [...new Set(all.flatMap((a) => a.canvasIds))].sort().join("\0"), [all]);
+  useEffect(() => {
+    let active = true;
+    let reported = false;
+    setIndexes(new Map());
+    const referenced = new Set(referencedIds.split("\0"));
+    void loadLocationIndexes(
+      canvasList.filter((c) => referenced.has(c.id)).map((c) => c.id),
+      (id) => backend.loadCanvas(id),
+      t("未命名文件夹"),
+      () => active,
+      (id, index) => setIndexes((previous) => new Map(previous).set(id, index)),
+      (id, error) => {
+        setIndexes((previous) => new Map(previous).set(id, null));
+        if (!reported) useAppStore.getState().showToast(t("读取文件位置失败：{error}", { error: String(error) }));
+        reported = true;
+      },
+    );
+    return () => { active = false; };
+  }, [canvasList, referencedIds, workspacePath, locale]);
   const locations = useMemo(() => {
     const canvases = new Map(canvasList.map((c) => [c.id, c]));
     const projects = new Map(projectList.map((p) => [p.id, p]));
-    return new Map(all.map((a) => [a.id, locationsOf(a, canvases, projects)]));
-  }, [all, canvasList, projectList]);
+    return new Map(all.map((a) => [a.id, locationsOf(a, canvases, projects, indexes)]));
+  }, [all, canvasList, projectList, indexes, locale]);
   const list = useMemo(() => {
     const q = normalize(query);
     const rows = all.filter((a) => matchesFilter(a, filter) && matchesQuery(a, q, locations.get(a.id) ?? []));
@@ -240,7 +289,7 @@ export function AssetLibrary() {
           {
             label: t("在画布中查看"),
             icon: <LocateFixed size={15} />,
-            children: where.map((l) => ({ label: l.label, onSelect: () => reveal(asset, l.canvasId) })),
+            children: where.map((l) => ({ label: l.label, wrapLabel: true, onSelect: () => reveal(asset, l) })),
           },
           "separator",
         ]
@@ -270,8 +319,8 @@ export function AssetLibrary() {
   const selectedSize = list.filter((a) => selected.has(a.id)).reduce((sum, a) => sum + a.size, 0);
   const gridRef = useRef<HTMLDivElement>(null);
   const tableRef = useRef<HTMLTableElement>(null);
-  const gridWindow = useVirtualRows(gridRef, layout === "grid" ? list.length : 0, 228, 180, 14);
-  const tableWindow = useVirtualRows(tableRef, layout === "list" ? list.length : 0, 32);
+  const gridWindow = useVirtualRows(gridRef, layout === "grid" ? list.length : 0, 286, 180, 14);
+  const tableWindow = useVirtualRows(tableRef, layout === "list" ? list.length : 0, 72);
 
   return (
     <div className="page assets-page" onClick={() => setSelected(new Set())}>

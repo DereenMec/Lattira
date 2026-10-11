@@ -26,7 +26,7 @@
 npm install
 npm run tauri dev     # 启动桌面端（会自动启动 Vite）
 npm run dev           # 只在浏览器里调界面：元数据在 localStorage，文件在 IndexedDB
-npm test              # 保存、命名、格式兼容与浏览器存储回归测试
+npm test              # 保存、命名、格式兼容、资源完整路径与浏览器存储回归测试
 npm run typecheck     # 前端类型检查
 npm run i18n:check    # 检查英文翻译是否齐全
 npm run build && npx vite preview --port 5480   # 生产构建，浏览器打开 http://localhost:5480/?perf 可做性能测试
@@ -132,6 +132,8 @@ npm run release:manifest -- notes.md
 ## 可靠性与兼容性
 
 v0.8.0 的修复范围和验证记录见 [代码审视修复清单](REVIEW-FIXES-v0.8.0.md)。
+
+资源库完整路径从引用画布的 JSON Canvas 内容计算，与画布视图共用解析和文件夹父级链规则。每张文件或图片卡片记录独立的元素 ID，点击路径按该 ID 定位到直接父文件夹；同一资源的不同位置分别列出。读取按画布去重，最多四个并发任务，离开页面或切换工作区后停止调度并丢弃过期结果。深层目录、旧版分组和取消读取的回归覆盖见 `scripts/regression.test.mjs`，v0.8.1 验证记录见 [发布说明](RELEASE-v0.8.1.md)。
 保存失败会保留草稿并阻止切换画布、工作区或退出；界面提供重试，以及另存恢复副本后重新打开的操作。
 磁盘画布被外部程序改过时不会直接覆盖，会留下 `.conflict.canvas` 副本以供合并。
 删除画布时为引用的资源创建独立快照，回收站画布不受资源库改名、编辑或清理影响；恢复同内容文件仍保留原 ID。

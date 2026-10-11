@@ -251,7 +251,10 @@ export const en: Record<string, string> = {
     "“{name}” is also used by other cards, so this one now has its own copy. Changes here won't affect the others.",
   // ---- 名字不重复 ----
   "所在位置": "Location",
-  "等 {n} 个画布": "and {n} canvases",
+  "另 {n} 个位置": "{n} more locations",
+  "正在读取路径…": "Loading path…",
+  "无法读取路径": "Path unavailable",
+  "读取文件位置失败：{error}": "Failed to load file locations: {error}",
   "在画布中查看": "Show on canvas",
   "此位置已有名为「{name}」的文件或文件夹": "A file or folder named “{name}” already exists here",
   "_副本": "_copy",

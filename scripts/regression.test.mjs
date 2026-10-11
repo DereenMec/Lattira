@@ -154,7 +154,51 @@ test("cached tabs reload externally edited content", async () => {
   await store.getState().load("a"); assert.equal(store.getState().doc.elements[0].text, "external");
 });
 
-const folders = module("src/lib/folders.ts", ["cardName", "namesAt", "withDescendants", "canMoveInto"], names);
+const folders = module("src/lib/folders.ts", ["cardName", "namesAt", "withDescendants", "canMoveInto", "folderChain", "folderName"], names);
+const locations = module("src/features/assets/assetLocations.ts", ["indexAssetLocations", "loadLocationIndexes"], { ...folders, ...json });
+
+test("asset locations preserve every folder and every occurrence, including images", () => {
+  const chain = Array.from({ length: 200 }, (_, i) => node(`folder-${i}`, { type: "folder", label: `层 ${i + 1}`, parentId: i ? `folder-${i - 1}` : undefined }));
+  const index = locations.indexAssetLocations([...chain, fileCard("root"), fileCard("nested", "folder-199"), node("image", { type: "image", assetId: "image-asset", parentId: "folder-199" })], "未命名文件夹");
+  assert.equal(index.get("asset").length, 2);
+  assert.equal(index.get("asset")[0].elementId, "root");
+  assert.equal(index.get("asset")[0].folders.length, 0);
+  assert.equal(index.get("asset")[1].elementId, "nested");
+  assert.equal(index.get("asset")[1].folders.join(" › "), chain.map((el) => el.label).join(" › "));
+  assert.equal(index.get("image-asset")[0].folders.length, 200);
+});
+
+test("location loading shares the canvas parser and supports legacy nested groups", async () => {
+  const raw = file([
+    node("outer", { type: "group", label: "外层", width: 1000, height: 1000 }),
+    node("inner", { type: "group", label: "内层", x: 100, y: 100, width: 500, height: 500 }),
+    node("card", { type: "file", file: "assets/asset.txt", x: 150, y: 150, width: 260, height: 76, lattira: { type: "file", assetId: "asset" } }),
+  ]);
+  let calls = 0; let received;
+  await locations.loadLocationIndexes(["c", "c"], async () => { calls++; return raw; }, "未命名文件夹", () => true, (_id, index) => { received = index; }, (_id, error) => { throw error; });
+  assert.equal(calls, 1);
+  assert.equal(received.get("asset")[0].folders.join(" › "), "外层 › 内层");
+});
+
+test("location loading bounds concurrency and isolates an unreadable canvas", async () => {
+  let inFlight = 0; let peak = 0; const delivered = [], failures = [];
+  await locations.loadLocationIndexes(Array.from({ length: 12 }, (_, i) => String(i)), async (id) => {
+    inFlight++; peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 1)); inFlight--;
+    if (id === "3") throw new Error("unreadable");
+    return file([]);
+  }, "Untitled", () => true, (id) => delivered.push(id), (id) => failures.push(id));
+  assert.equal(peak, 4); assert.equal(delivered.length, 11); assert.deepEqual(failures, ["3"]);
+});
+
+test("leaving the asset library stops scheduling and discards late paths", async () => {
+  let active = true; let calls = 0; let release; const received = [];
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const loading = locations.loadLocationIndexes(Array.from({ length: 12 }, (_, i) => String(i)), async () => { calls++; await waiting; return file([]); }, "Untitled", () => active, (id) => received.push(id), (id) => received.push(id));
+  assert.equal(calls, 4); active = false; release(); await loading;
+  assert.equal(calls, 4); assert.equal(received.length, 0);
+});
+
 function naming(elements = [], answers = []) {
   const events = []; const assets = new Map([["asset", { id: "asset", name: "one.txt", canvasIds: [] }]]);
   let active = true;

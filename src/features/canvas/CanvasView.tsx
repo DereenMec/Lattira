@@ -192,14 +192,21 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   // 从全局搜索跳过来的那张卡片：查找结果出来后，把查找栏的序号对到它
   const pendingFindFocus = useRef<ID | null>(null);
 
-  const loaded = doc?.canvasId === canvasId;
+  // 离开资源库后 store 中可能仍保留这张画布；等待 load 完成再定位，避免 load 清空刚打开的文件夹。
+  const [loadedCanvasId, setLoadedCanvasId] = useState<ID | null>(null);
+  const loaded = doc?.canvasId === canvasId && loadedCanvasId === canvasId;
 
   // ---- 加载与离开 ----
   useEffect(() => {
+    let active = true;
     canvas()
       .load(canvasId)
+      .then(() => { if (active) setLoadedCanvasId(canvasId); })
       .catch((e) => app().showToast(t("打开画布失败：{error}", { error: String(e) })));
-    return () => void canvas().flush().catch(() => {});
+    return () => {
+      active = false;
+      void canvas().flush().catch(() => {});
+    };
   }, [canvasId]);
 
   useEffect(() => {
@@ -239,11 +246,9 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
   useEffect(() => {
     if (!loaded || (!focusElementId && !focusAssetId) || size.w === 0) return;
     const elements = canvas().doc?.elements ?? [];
-    const hits = elements.filter(
-      (e) => e.id === focusElementId || (!!focusAssetId && "assetId" in e && e.assetId === focusAssetId),
-    );
-    // 同一个文件既在画布上又在文件夹里时，优先定位画布上的
-    const el = hits.find(onCanvas) ?? hits[0];
+    const hits = elements.filter((e) => !!focusAssetId && "assetId" in e && e.assetId === focusAssetId);
+    // 精确卡片优先；只有未指定卡片时，才在资源的引用中优先选择画布上的。
+    const el = elements.find((e) => e.id === focusElementId) ?? hits.find(onCanvas) ?? hits[0];
     if (!el) return;
     // 在文件夹里的：定位到画布上包含它的文件夹，并打开它所在的文件夹窗口
     const shown = canvasAncestor(new Map(elements.map((e) => [e.id, e])), el.id);
@@ -251,7 +256,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
     canvas().setViewport(fitRect(shown, size.w, size.h, 160, 1));
     canvas().select([shown.id]);
     setHighlightId(shown.id);
-    if (el.parentId) canvas().openFolder(el.parentId, el.id);
+    canvas().openFolder(el.parentId ?? null, el.parentId ? el.id : undefined);
     if (findQuery?.trim()) {
       // nav 不变：不再跳到第一处命中，停在搜索结果对应的卡片上；序号等结果算出来后再对齐
       setFind((f) => ({ ...f, open: true, query: findQuery.trim(), index: 0 }));
