@@ -3,6 +3,7 @@ import { toLocalDate } from "@/lib/date";
 import { uuidv7 } from "@/lib/id";
 import type { Asset, CanvasDay, CanvasMeta, ID, Project, SearchHit, TrashItem, WorkspaceInfo } from "@/types/model";
 import { PROJECT_COLORS } from "@/types/model";
+import { nameKey, sameName, splitName, uniqueName } from "@/lib/names";
 import { reportImportProgress } from "./importProgress";
 import type { Backend, CopyPayload } from "./backend";
 
@@ -60,11 +61,18 @@ export function createBrowserBackend(): Backend {
     return c;
   };
 
-  const withRefCounts = () =>
-    state.assets.map((a) => ({
-      ...a,
-      refCount: Object.values(state.assetRefs).filter((ids) => ids.includes(a.id)).length,
-    }));
+  const withRefCounts = () => state.assets.map(withRefs);
+  function withRefs(a: Asset): Asset {
+    const canvasIds = Object.entries(state.assetRefs)
+      .filter(([, ids]) => ids.includes(a.id))
+      .map(([c]) => c);
+    return { ...a, refCount: canvasIds.length, canvasIds };
+  }
+
+  // 与桌面端相同的命名规则（见 src-tauri/src/commands.rs）：项目名在工作区里唯一，画布名在项目里唯一
+  const projectTaken = (name: string, exclude?: ID) => state.projects.some((p) => p.id !== exclude && sameName(p.name, name));
+  const canvasTitles = (projectId: ID, exclude?: ID) =>
+    new Set(state.canvases.filter((c) => c.projectId === projectId && c.id !== exclude).map((c) => nameKey(c.title)));
 
   async function sha256(buf: ArrayBuffer) {
     const digest = await crypto.subtle.digest("SHA-256", buf);
@@ -109,6 +117,7 @@ export function createBrowserBackend(): Backend {
       return [...state.projects];
     },
     async createProject(name, color) {
+      if (projectTaken(name)) throw new Error(t("已经有名为「{name}」的项目", { name }));
       const now = Date.now();
       const p: Project = { id: uuidv7(), name, color, isInbox: false, pinned: false, archived: false, createdAt: now, updatedAt: now };
       state.projects.push(p);
@@ -118,6 +127,7 @@ export function createBrowserBackend(): Backend {
     async updateProject(id, patch) {
       const p = state.projects.find((p) => p.id === id);
       if (!p) throw new Error(t("项目不存在：{id}", { id }));
+      if (patch.name && projectTaken(patch.name, id)) throw new Error(t("已经有名为「{name}」的项目", { name: patch.name }));
       Object.assign(p, patch, { updatedAt: Date.now() });
       persist();
       return { ...p };
@@ -128,14 +138,29 @@ export function createBrowserBackend(): Backend {
     },
     async createCanvas(projectId, title) {
       const now = Date.now();
-      const c: CanvasMeta = { id: uuidv7(), projectId, title, elementCount: 0, createdAt: now, updatedAt: now };
+      const c: CanvasMeta = {
+        id: uuidv7(),
+        projectId,
+        title: uniqueName(title.trim() || t("未命名画布"), canvasTitles(projectId)),
+        elementCount: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
       state.canvases.push(c);
       persist();
       return { ...c };
     },
     async updateCanvas(id, patch) {
       const c = findCanvas(id);
-      Object.assign(c, patch);
+      const projectId = patch.projectId ?? c.projectId;
+      const title = patch.title?.trim();
+      if (title && title !== c.title) {
+        if (canvasTitles(projectId, id).has(nameKey(title))) throw new Error(t("项目里已经有名为「{name}」的画布", { name: title }));
+        c.title = title;
+      } else if (projectId !== c.projectId) {
+        c.title = uniqueName(c.title, canvasTitles(projectId, id));
+      }
+      c.projectId = projectId;
       persist();
       return { ...c };
     },
@@ -196,6 +221,7 @@ export function createBrowserBackend(): Backend {
             size: f.size,
             importedAt: Date.now(),
             refCount: 0,
+            canvasIds: [],
           };
           state.assets.push(asset);
         }
@@ -203,7 +229,7 @@ export function createBrowserBackend(): Backend {
         if (asset.mime.startsWith("image/") && asset.width === undefined) {
           Object.assign(asset, await imageSize(blobUrls.get(asset.id)!));
         }
-        out.push(asset);
+        out.push(withRefs(asset));
       }
       persist();
       return out;
@@ -290,18 +316,38 @@ export function createBrowserBackend(): Backend {
     async checkAssetChanges() {
       return [];
     },
-    async forkAssetForCanvas(id, canvasId) {
+    async forkAssetForCanvas(id, canvasId, force = false) {
       const asset = state.assets.find((a) => a.id === id);
       if (!asset) throw new Error(t("找不到这个文件"));
       const shared = Object.entries(state.assetRefs).some(([c, ids]) => c !== canvasId && ids.includes(id));
-      if (!shared) return { ...asset };
+      if (!shared && !force) return withRefs(asset);
       const copyId = uuidv7();
       const copy: Asset = { ...asset, id: copyId, hash: `${asset.hash.split(":")[0]}:${copyId}`, importedAt: Date.now(), refCount: 0 };
       state.assets.push(copy);
       const url = blobUrls.get(id);
       if (url) blobUrls.set(copyId, url);
       persist();
-      return { ...copy };
+      return withRefs(copy);
+    },
+    async copyAssetAs(id, name) {
+      const asset = state.assets.find((a) => a.id === id);
+      if (!asset) throw new Error(t("找不到这个文件"));
+      const [, oldExt] = splitName(asset.name, true);
+      const fileName = splitName(name, true)[1] ? name : `${name}${oldExt}`;
+      const copyId = uuidv7();
+      const copy: Asset = {
+        ...asset,
+        id: copyId,
+        name: fileName,
+        hash: `${asset.hash.split(":")[0]}:${copyId}`,
+        path: `assets/${toLocalDate(new Date()).slice(0, 7)}/${fileName}`,
+        importedAt: Date.now(),
+      };
+      state.assets.push(copy);
+      const url = blobUrls.get(id);
+      if (url) blobUrls.set(copyId, url);
+      persist();
+      return withRefs(copy);
     },
     // 浏览器读不到系统的「新建」菜单，只提供文本文档
     async listNewFileTypes() {
@@ -320,6 +366,7 @@ export function createBrowserBackend(): Backend {
         size: 0,
         importedAt: Date.now(),
         refCount: 0,
+        canvasIds: [],
       };
       state.assets.push(asset);
       blobUrls.set(id, URL.createObjectURL(new Blob([], { type: asset.mime })));

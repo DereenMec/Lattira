@@ -166,13 +166,13 @@ export function assetsInTree(nodes: ImportNode[]): Asset[] {
   return nodes.flatMap((n) => (n.kind === "file" ? [n.asset] : assetsInTree(n.children)));
 }
 
-/** 空文件夹卡片，以 at 为中心；parentId 不为空时建在那个文件夹里 */
-export function newFolder(at: Point, parentId?: ID): FolderElement {
+/** 空文件夹卡片，以 at 为中心；parentId 不为空时建在那个文件夹里。label 应在这一层里不重名，见 cardNames.newFolderLabel */
+export function newFolder(at: Point, parentId?: ID, label = t("新文件夹")): FolderElement {
   const now = Date.now();
   return {
     id: uuidv7(),
     type: "folder",
-    label: t("新文件夹"),
+    label,
     x: at.x - FOLDER_W / 2,
     y: at.y - FOLDER_H / 2,
     width: FOLDER_W,

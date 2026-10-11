@@ -2,7 +2,8 @@
  * 画布上的文件夹：文件夹是一张卡片，里面的元素用 parentId 指向它，和画布上的元素存在同一个列表里。
  * 这里是按 parentId 组织这些元素的工具函数。
  */
-import type { CanvasElement, FolderElement, ID } from "@/types/model";
+import type { Asset, CanvasElement, FolderElement, ID } from "@/types/model";
+import { nameKey } from "./names";
 import type { Point, Rect } from "./geometry";
 
 /** 文件夹卡片的大小，与文件卡片一致 */
@@ -89,6 +90,33 @@ export function canMoveInto(elements: CanvasElement[], ids: Iterable<ID>, folder
 }
 
 export const folderName = (f: FolderElement, untitled: string) => f.label.trim() || untitled;
+
+/**
+ * 卡片在所在层级（画布上一层或某个文件夹里）的名字：文件、图片卡片是文件名，文件夹卡片是文件夹名。
+ * 同一层里这些名字不能重复（不区分大小写），见 features/canvas/cardNames.ts。文本、链接卡片没有名字，返回 null
+ */
+export function cardName(el: CanvasElement, assets: ReadonlyMap<ID, Asset>, untitledFolder: string): string | null {
+  if (el.type === "folder") return folderName(el, untitledFolder);
+  if (el.type === "file" || el.type === "image") return assets.get(el.assetId)?.name ?? null;
+  return null;
+}
+
+/** parentId 这一层（为空时是画布上）已有的名字（nameKey 形式）；exclude 中的卡片不算 */
+export function namesAt(
+  elements: CanvasElement[],
+  parentId: ID | undefined,
+  assets: ReadonlyMap<ID, Asset>,
+  untitledFolder: string,
+  exclude?: ReadonlySet<ID>,
+): Set<string> {
+  const out = new Set<string>();
+  for (const el of elements) {
+    if ((el.parentId ?? undefined) !== parentId || exclude?.has(el.id)) continue;
+    const name = cardName(el, assets, untitledFolder);
+    if (name !== null) out.add(nameKey(name));
+  }
+  return out;
+}
 
 /**
  * 把一批元素排到画布上：第一个的中心对准 at，其余向右排，排成接近 2:1 的网格。返回每个元素的新位置。

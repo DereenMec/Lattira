@@ -19,10 +19,11 @@ import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasElement, ID } from "@/types/model";
-import { copySelection, cutSelection, pasteIntoCanvas } from "./clipboard";
+import { copySelection, cutSelection, duplicateCards, pasteIntoCanvas } from "./clipboard";
 import { Highlight } from "@/features/search/Highlight";
 import { FolderGlyph } from "./FolderGlyph";
 import { hostOf, openLink, promptLink } from "./links";
+import { moveIntoFolderNamed, moveToCanvasNamed, newFolderLabel } from "./cardNames";
 import { newMenuEntry } from "./newFiles";
 import { openFromCanvas } from "./assetEditing";
 import { newFolder, newTextCard as makeTextCard } from "./placement";
@@ -97,7 +98,7 @@ function openItem(el: CanvasElement) {
   else {
     const asset = app().assets.get(el.assetId);
     if (!asset) app().showToast(tr("找不到这个文件"));
-    else void openFromCanvas(asset);
+    else void openFromCanvas(asset, el.id);
   }
 }
 
@@ -265,22 +266,16 @@ export function FolderPanel(props: Props) {
         return;
       }
       if (ev.type === "pointercancel" || !target) return;
-      if (target.kind === "canvas") {
-        canvas().moveToCanvas(ids, target.at);
-        setSelected([]);
-      } else if (canvas().moveIntoFolder(ids, target.id)) {
-        setSelected([]);
-      }
+      // 与目标位置重名时要求改名
+      if (target.kind === "canvas") void moveToCanvasNamed(ids, target.at).then(() => setSelected([]));
+      else void moveIntoFolderNamed(ids, target.id).then((moved) => moved && setSelected([]));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
   };
 
-  const moveOut = (ids: ID[]) => {
-    canvas().moveToCanvas(ids, propsRef.current.viewCenter());
-    setSelected([]);
-  };
+  const moveOut = (ids: ID[]) => void moveToCanvasNamed(ids, propsRef.current.viewCenter()).then(() => setSelected([]));
 
   const onItemMenu = (e: ReactMouseEvent, el: CanvasElement) => {
     e.stopPropagation();
@@ -290,7 +285,7 @@ export function FolderPanel(props: Props) {
   };
 
   const newSubfolder = () => {
-    const f = newFolder({ x: 0, y: 0 }, folderId);
+    const f = newFolder({ x: 0, y: 0 }, folderId, newFolderLabel(folderId));
     canvas().addElements([f], { select: false });
     setSelected([f.id]);
     void renameFolder(f);
@@ -346,6 +341,7 @@ export function FolderPanel(props: Props) {
     else if (mod && key === "a") setSelected(items.map((x) => x.id));
     else if (mod && key === "c" && shownSelected.length) void copySelection(shownSelected);
     else if (mod && key === "x" && shownSelected.length) void cutSelection(shownSelected);
+    else if (mod && key === "d" && shownSelected.length) void duplicateCards(shownSelected);
     else if (key === "escape") shownSelected.length ? setSelected([]) : close();
     else handled = false;
     // 窗口有焦点时，这些键只作用于窗口：窗口里没选中东西时也不能落到画布上，删掉或剪切画布上选中的卡片

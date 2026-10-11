@@ -45,6 +45,7 @@ pub fn run() {
             commands::open_asset,
             commands::check_asset_changes,
             commands::fork_asset_for_canvas,
+            commands::copy_asset_as,
             commands::list_new_file_types,
             commands::create_new_file,
             commands::reveal_asset,

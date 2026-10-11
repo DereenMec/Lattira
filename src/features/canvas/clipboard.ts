@@ -12,6 +12,7 @@ import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasElement, Edge, ID } from "@/types/model";
+import { resolveIncoming } from "./cardNames";
 import { importedMessage, pathsKey, runImport } from "./importing";
 import { hostOf, placeLinks, urlsInText } from "./links";
 import { assetsInTree, elementsForAssets, elementsForTree, newTextCard } from "./placement";
@@ -26,6 +27,32 @@ interface CopiedCards {
   edges: Edge[];
   /** 引用的资源及其绝对路径；粘贴到其他工作区时据此重新导入 */
   assets: (Asset & { absPath: string })[];
+  /** 复制自哪个画布的哪一层（parentId 为 null 时是画布上）：粘贴回同一处时重名的自动加「_副本」 */
+  source?: { canvasId: ID; parentId: ID | null };
+}
+
+/** 选中的卡片（连同文件夹里的内容）打包成粘贴用的数据 */
+function packCards(chosen: ID[]): CopiedCards | null {
+  const { doc } = canvas();
+  if (!doc || chosen.length === 0) return null;
+  const ids = withDescendants(doc.elements, chosen);
+  const elements = doc.elements.filter((e) => ids.has(e.id));
+  const { assets } = app();
+  const used = new Map<ID, Asset>();
+  for (const el of elements) {
+    if (el.type !== "image" && el.type !== "file") continue;
+    const a = assets.get(el.assetId);
+    if (a) used.set(a.id, a);
+  }
+  const first = doc.elements.find((e) => e.id === chosen[0]);
+  return {
+    app: "lattira",
+    version: 1,
+    elements,
+    edges: doc.edges.filter((e) => ids.has(e.fromId) && ids.has(e.toId)),
+    assets: [...used.values()].map((a) => ({ ...a, absPath: backend.assetPath(a) })),
+    source: { canvasId: doc.canvasId, parentId: first?.parentId ?? null },
+  };
 }
 
 const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.trim() ?? "";
@@ -37,34 +64,18 @@ const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.trim() ?? 
 export async function copySelection(selected?: ID[], opts: { cut?: boolean } = {}): Promise<void> {
   const { doc, selectedIds } = canvas();
   const chosen = selected ?? selectedIds;
-  if (!doc || chosen.length === 0) return;
-  const ids = withDescendants(doc.elements, chosen);
-  const elements = doc.elements.filter((e) => ids.has(e.id));
-  const edges = doc.edges.filter((e) => ids.has(e.fromId) && ids.has(e.toId));
-  const { assets } = app();
-  const used = new Map<ID, Asset>();
-  for (const el of elements) {
-    if (el.type !== "image" && el.type !== "file") continue;
-    const a = assets.get(el.assetId);
-    if (a) used.set(a.id, a);
-  }
-  const texts = elements.flatMap((el) =>
+  const cards = packCards(chosen);
+  if (!doc || !cards) return;
+  const texts = cards.elements.flatMap((el) =>
     el.type === "text" && el.text.trim()
       ? [{ name: firstLine(el.text).slice(0, 40) || t("文本"), text: el.text }]
       : el.type === "link"
         ? [{ name: (el.title || hostOf(el.url)).slice(0, 40), text: el.url }]
         : [],
   );
-  const cards: CopiedCards = {
-    app: "lattira",
-    version: 1,
-    elements,
-    edges,
-    assets: [...used.values()].map((a) => ({ ...a, absPath: backend.assetPath(a) })),
-  };
   try {
     await backend.copyCards({
-      assetIds: [...used.keys()],
+      assetIds: cards.assets.map((a) => a.id),
       texts,
       plainText: texts.map((t) => t.text).join("\n\n"),
       cards: JSON.stringify(cards),
@@ -98,9 +109,12 @@ function parseCards(raw: string | null): CopiedCards | null {
 
 /**
  * 粘贴复制来的卡片：整体以 at 为中心放置，生成新 id；当前工作区没有的文件会重新导入。
- * parentId 不为空时放进那个文件夹。返回最外层的那些新卡片
+ * parentId 不为空时放进那个文件夹。同一层里重名时：粘贴回复制时的那一层（就地复制）自动加「_副本」，
+ * 其他位置要求改名（见 cardNames.ts）。返回最外层的那些新卡片
  */
 async function pasteCards(data: CopiedCards, at: Point, parentId?: ID): Promise<ID[]> {
+  const doc = canvas().doc;
+  const inPlace = !!data.source && data.source.canvasId === doc?.canvasId && (data.source.parentId ?? undefined) === parentId;
   const { assets } = app();
   const remap = new Map<ID, ID>();
   const missing = data.assets.filter((a) => !assets.has(a.id) && a.absPath);
@@ -125,7 +139,7 @@ async function pasteCards(data: CopiedCards, at: Point, parentId?: ID): Promise<
   const now = Date.now();
   const ids = new Map<ID, ID>();
   for (const el of usable) ids.set(el.id, uuidv7());
-  const elements = usable.map((el) => {
+  const fresh = usable.map((el) => {
     const top = isTop(el);
     const moved = {
       ...el,
@@ -138,11 +152,30 @@ async function pasteCards(data: CopiedCards, at: Point, parentId?: ID): Promise<
     };
     return "assetId" in moved ? { ...moved, assetId: remap.get(moved.assetId) ?? moved.assetId } : moved;
   }) as CanvasElement[];
+  const elements = await resolveIncoming(fresh, parentId, inPlace ? "copy" : "ask");
+  const kept = new Set(elements.map((el) => el.id));
   const edges = data.edges
-    .filter((e) => ids.has(e.fromId) && ids.has(e.toId))
-    .map((e) => ({ ...e, id: uuidv7(), fromId: ids.get(e.fromId)!, toId: ids.get(e.toId)! }));
+    .map((e) => ({ ...e, id: uuidv7(), fromId: ids.get(e.fromId)!, toId: ids.get(e.toId)! }))
+    .filter((e) => kept.has(e.fromId) && kept.has(e.toId));
   canvas().insertCards(elements, edges);
-  return usable.filter(isTop).map((el) => ids.get(el.id)!);
+  return elements.filter((el) => (el.parentId ?? undefined) === parentId).map((el) => el.id);
+}
+
+/** 创建副本（Ctrl+D）：在原处稍微错开放一份，重名的文件、文件夹自动加「_副本」，文件复制成独立的一份 */
+export async function duplicateCards(chosen: ID[]): Promise<void> {
+  const doc = canvas().doc;
+  const data = packCards(chosen);
+  if (!doc || !data) return;
+  const top = data.elements.filter((el) => chosen.includes(el.id));
+  const b = boundsOf(top);
+  if (!b) return;
+  const parentId = data.source?.parentId ?? undefined;
+  try {
+    const ids = await pasteCards(data, { x: b.x + b.width / 2 + 32, y: b.y + b.height / 2 + 32 }, parentId);
+    if (parentId) canvas().showInOpenFolder(parentId, ids);
+  } catch (e) {
+    app().showToast(t("创建副本失败：{error}", { error: String(e) }));
+  }
 }
 
 /**
@@ -151,7 +184,9 @@ async function pasteCards(data: CopiedCards, at: Point, parentId?: ID): Promise<
  * parentId 不为空时粘贴到那个文件夹里（at 只用于保存位置）。返回粘贴出来的最外层元素
  */
 export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text: string }, parentId?: ID): Promise<ID[]> {
-  const add = (elements: CanvasElement[]) => {
+  // 导入、粘贴进来的文件和文件夹与这一层已有的重名时要求改名
+  const add = async (incoming: CanvasElement[]) => {
+    const elements = await resolveIncoming(incoming, parentId, "ask");
     canvas().addElements(elements, { select: !parentId });
     return elements.filter((el) => el.parentId === parentId).map((el) => el.id);
   };
@@ -170,7 +205,7 @@ export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text
       });
       if (!nodes) return [];
       app().addAssets(assetsInTree(nodes));
-      return add(elementsForTree(nodes, at, parentId));
+      return await add(elementsForTree(nodes, at, parentId));
     }
     let imported: Asset[] = [];
     if (fallback.files.length) {
@@ -178,13 +213,13 @@ export async function pasteIntoCanvas(at: Point, fallback: { files: File[]; text
     }
     if (imported.length) {
       app().addAssets(imported);
-      return add(into(elementsForAssets(imported, at)));
+      return await add(into(elementsForAssets(imported, at)));
     }
 
     const text = fallback.text || clip?.text || "";
     const urls = urlsInText(text);
     if (urls.length) return placeLinks(urls, at, parentId).map((el) => el.id);
-    if (text.trim()) return add(into([newTextCard(at, text)]));
+    if (text.trim()) return await add(into([newTextCard(at, text)]));
   } catch (e) {
     app().showToast(t("粘贴失败：{error}", { error: String(e) }));
   }

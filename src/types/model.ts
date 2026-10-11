@@ -143,6 +143,8 @@ export interface Asset {
   ocrText?: string | null;
   /** 引用该资源的画布数 */
   refCount: number;
+  /** 引用该资源的画布（不含回收站里的）；资源库据此显示所在的项目和画布 */
+  canvasIds: ID[];
 }
 
 /** Windows 右键菜单「新建」里的一种文件，与 src-tauri/src/shellnew.rs 的 NewFileType 对应 */

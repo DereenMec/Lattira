@@ -33,17 +33,19 @@ import {
   Ungroup,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { copySelection, cutSelection } from "@/features/canvas/clipboard";
+import { dissolveFolderNamed, folderRenameError, moveIntoFolderNamed, nameError, withExt } from "@/features/canvas/cardNames";
+import { copySelection, cutSelection, duplicateCards } from "@/features/canvas/clipboard";
+import { fromJsonCanvas } from "@/lib/jsonCanvas";
 import { ownAssetForCanvas } from "@/features/canvas/assetEditing";
 import { editLink, fetchPreview, openLink } from "@/features/canvas/links";
 import { exportCanvas, importCanvases } from "@/features/canvas/transfer";
 import { openProjectStyle } from "@/features/project/ProjectStyleDialog";
 import { ProjectIcon } from "@/features/project/projectIcons";
 import { t } from "@/i18n";
-import { folderChain, folderName, isFolder, withDescendants } from "@/lib/folders";
+import { folderChain, folderName, isFolder, namesAt as namesAtOf, withDescendants } from "@/lib/folders";
 import { confirmAction } from "@/services/confirm";
 import { backend } from "@/services/backend";
-import { projectLabel, useAppStore } from "@/store/appStore";
+import { canvasTitleTaken, projectLabel, projectNameTaken, useAppStore } from "@/store/appStore";
 import { useCanvasStore, type AlignMode } from "@/store/canvasStore";
 import {
   CARD_COLORS,
@@ -91,12 +93,41 @@ async function copyImage(asset: Asset) {
   });
 }
 
-/** 重命名文件；inCanvas 时只改这个画布用的那份（见 ownAssetForCanvas） */
-async function renameAsset(asset: Asset, inCanvas: boolean) {
-  const name = await promptText(t("重命名文件"), asset.name);
+/**
+ * 改名后会和哪些名字冲突：在画布上时是卡片 cardId 所在的那一层（不给 cardId 时是这个画布上用这个文件的卡片所在的各层）；
+ * 在资源库里时，是所有用到这个文件的画布里它所在的各层（要读取这些画布）
+ */
+async function namesAround(asset: Asset, inCanvas: boolean, cardId?: ID): Promise<Set<string>> {
+  const doc = cv().doc;
+  const docs =
+    inCanvas && doc
+      ? [doc.elements]
+      : await Promise.all(
+          asset.canvasIds.map(async (id) =>
+            id === doc?.canvasId ? doc.elements : fromJsonCanvas(await backend.loadCanvas(id).catch(() => ""), id).elements,
+          ),
+        );
+  const taken = new Set<string>();
+  for (const elements of docs) {
+    const users = elements.filter((e) => "assetId" in e && e.assetId === asset.id && (!cardId || e.id === cardId));
+    const mine = new Set(users.map((e) => e.id));
+    for (const level of new Set(users.map((e) => e.parentId))) {
+      for (const n of namesAtOf(elements, level, app().assets, t("未命名文件夹"), mine)) taken.add(n);
+    }
+  }
+  return taken;
+}
+
+/** 重命名文件；inCanvas 时只改这张卡片（cardId）或这个画布用的那份（见 ownAssetForCanvas），同一层里不能重名 */
+async function renameAsset(asset: Asset, inCanvas: boolean, cardId?: ID) {
+  const taken = await namesAround(asset, inCanvas, cardId);
+  const name = await promptText(t("重命名文件"), asset.name, {
+    selectStem: true,
+    validate: (v) => nameError(withExt(v, asset.name), taken),
+  });
   if (!name || name === asset.name) return;
   await attempt(t("重命名"), async () => {
-    const target = inCanvas ? await ownAssetForCanvas(asset) : asset;
+    const target = inCanvas ? await ownAssetForCanvas(asset, cardId) : asset;
     const renamed = await backend.renameAsset(target, name);
     app().addAssets([renamed]);
     app().showToast(t("已重命名为「{name}」", { name: renamed.name }));
@@ -108,10 +139,10 @@ async function renameAsset(asset: Asset, inCanvas: boolean) {
  * inCanvas 为 true（画布、文件夹窗口、检查器里）时，会拿到文件本身的操作（打开、显示位置、复制路径、重命名）
  * 用这个画布自己的那份，在这里修改不影响其他画布，见 features/canvas/assetEditing.ts；资源库里操作的是原来那份
  */
-export function assetEntries(asset: Asset, inCanvas = false): MenuEntry[] {
+export function assetEntries(asset: Asset, inCanvas = false, cardId?: ID): MenuEntry[] {
   const desktop = backend.kind === "tauri";
   const image = asset.mime.startsWith("image/");
-  const own = () => (inCanvas ? ownAssetForCanvas(asset) : Promise.resolve(asset));
+  const own = () => (inCanvas ? ownAssetForCanvas(asset, cardId) : Promise.resolve(asset));
   return [
     {
       label: t("打开"),
@@ -139,7 +170,7 @@ export function assetEntries(asset: Asset, inCanvas = false): MenuEntry[] {
       disabled: !desktop,
       onSelect: () => void attempt(t("复制"), async () => copyText(backend.assetPath(await own()), t("文件路径"))),
     },
-    { label: t("重命名…"), icon: <FilePen size={S} />, onSelect: () => void renameAsset(asset, inCanvas) },
+    { label: t("重命名…"), icon: <FilePen size={S} />, onSelect: () => void renameAsset(asset, inCanvas, cardId) },
     {
       label: t("另存为…"),
       icon: <Save size={S} />,
@@ -199,8 +230,8 @@ function moveToFolderEntry(ids: ID[]): MenuEntry {
       ? targets.map(({ f, path }) => ({
           label: path,
           icon: <Folder size={S} />,
-          onSelect: () => {
-            if (!cv().moveIntoFolder(ids, f.id)) return;
+          onSelect: async () => {
+            if (!(await moveIntoFolderNamed(ids, f.id))) return;
             app().showToast(t("已移到「{name}」", { name: folderName(f, t("未命名文件夹")) }));
           },
         }))
@@ -209,7 +240,7 @@ function moveToFolderEntry(ids: ID[]): MenuEntry {
 }
 
 export async function renameFolder(f: FolderElement) {
-  const label = await promptText(t("重命名文件夹"), f.label);
+  const label = await promptText(t("重命名文件夹"), f.label, { validate: (v) => folderRenameError(f, v) });
   if (label !== null && label !== f.label) cv().updateElements({ [f.id]: { label } });
 }
 
@@ -230,7 +261,7 @@ function removeElements(ids: ID[]) {
 const arrangeEntries = (ids: ID[]): MenuEntry[] => [
   { label: t("复制"), icon: <ClipboardCopy size={S} />, hint: "Ctrl+C", onSelect: () => void copySelection() },
   { label: t("剪切"), icon: <Scissors size={S} />, hint: "Ctrl+X", onSelect: () => void cutSelection() },
-  { label: t("创建副本"), icon: <CopyPlus size={S} />, hint: "Ctrl+D", onSelect: () => cv().duplicate(ids) },
+  { label: t("创建副本"), icon: <CopyPlus size={S} />, hint: "Ctrl+D", onSelect: () => void duplicateCards(ids) },
   { label: t("置于顶层"), icon: <ArrowUpToLine size={S} />, onSelect: () => cv().reorder(ids, "front") },
   { label: t("置于底层"), icon: <ArrowDownToLine size={S} />, onSelect: () => cv().reorder(ids, "back") },
 ];
@@ -285,7 +316,7 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
           label: t("解散文件夹（内容放回画布）"),
           icon: <Ungroup size={S} />,
           disabled: inside === 0,
-          onSelect: () => cv().dissolveFolder(el.id),
+          onSelect: () => void dissolveFolderNamed(el.id),
         },
         ...arrangeEntries(ids),
         "separator",
@@ -300,7 +331,7 @@ export function elementMenu(ids: ID[]): MenuEntry[] {
     }
     const asset = app().assets.get(el.assetId);
     return [
-      ...(asset ? assetEntries(asset, true) : []),
+      ...(asset ? assetEntries(asset, true, el.id) : []),
       "separator",
       moveToFolderEntry(ids),
       ...arrangeEntries(ids),
@@ -384,7 +415,7 @@ export function folderItemMenu(ids: ID[], actions: { open(id: ID): void; moveOut
     ];
   } else {
     const asset = app().assets.get(el.assetId);
-    own = asset ? assetEntries(asset, true) : [];
+    own = asset ? assetEntries(asset, true, el.id) : [];
   }
   return [...own, ...(own.length ? (["separator"] as MenuEntry[]) : []), ...common, "separator", remove];
 }
@@ -399,7 +430,10 @@ export function canvasMenu(canvas: CanvasMeta): MenuEntry[] {
       label: t("重命名…"),
       icon: <Pencil size={S} />,
       onSelect: async () => {
-        const title = await promptText(t("重命名画布"), canvas.title);
+        const title = await promptText(t("重命名画布"), canvas.title, {
+          validate: (v) =>
+            canvasTitleTaken(canvas.projectId, v, canvas.id) ? t("项目里已经有名为「{name}」的画布", { name: v }) : null,
+        });
         if (title && title !== canvas.title) await attempt(t("重命名"), () => updateCanvas(canvas.id, { title }));
       },
     },
@@ -452,7 +486,9 @@ export function projectMenu(project: Project): MenuEntry[] {
             label: t("重命名…"),
             icon: <Pencil size={S} />,
             onSelect: async () => {
-              const name = await promptText(t("重命名项目"), project.name);
+              const name = await promptText(t("重命名项目"), project.name, {
+                validate: (v) => (projectNameTaken(v, project.id) ? t("已经有名为「{name}」的项目", { name: v }) : null),
+              });
               if (name && name !== project.name) await attempt(t("重命名"), () => updateProject(project.id, { name }));
             },
           },

@@ -5,6 +5,12 @@ import { useT } from "@/i18n";
 interface PromptOptions {
   /** 只选中扩展名之前的部分（输入文件名时），与资源管理器重命名一致 */
   selectStem?: boolean;
+  /** 标题下面的说明文字 */
+  message?: string;
+  /** 检查输入：有问题时返回提示文字（显示在输入框下方，不能确定），没问题时返回 null */
+  validate?(value: string): string | null;
+  /** 取消按钮的文字，默认「取消」 */
+  cancelLabel?: string;
 }
 
 interface PromptState {
@@ -43,7 +49,9 @@ export function PromptHost() {
   }, [prompt, value]);
 
   if (!prompt) return null;
+  const error = value.trim() ? (prompt.opts.validate?.(value.trim()) ?? null) : null;
   const finish = (v: string | null) => {
+    if (v !== null && error) return;
     usePrompt.setState({ prompt: null });
     prompt.resolve(v === null ? null : v.trim() || null);
   };
@@ -52,20 +60,23 @@ export function PromptHost() {
     <div className="overlay" onPointerDown={() => finish(null)}>
       <div className="dialog prompt-dialog" onPointerDown={(e) => e.stopPropagation()}>
         <h3>{prompt.title}</h3>
+        {prompt.opts.message && <p className="prompt-message">{prompt.opts.message}</p>}
         <input
           ref={inputRef}
           value={value}
+          aria-invalid={!!error}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") finish(value);
             if (e.key === "Escape") finish(null);
           }}
         />
+        {error && <p className="prompt-error">{error}</p>}
         <div className="dialog-actions">
           <button className="btn ghost" onClick={() => finish(null)}>
-            {t("取消")}
+            {prompt.opts.cancelLabel ?? t("取消")}
           </button>
-          <button className="btn primary" onClick={() => finish(value)}>
+          <button className="btn primary" disabled={!!error} onClick={() => finish(value)}>
             {t("确定")}
           </button>
         </div>

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { backend, type CanvasPatch, type ProjectPatch } from "@/services/backend";
 import { seedWelcomeCanvas } from "@/features/workspace/seed";
 import { t } from "@/i18n";
+import { sameName } from "@/lib/names";
 import type { Asset, CanvasMeta, ID, Project, WorkspaceInfo } from "@/types/model";
 import { PROJECT_COLORS } from "@/types/model";
 
@@ -58,6 +59,16 @@ interface AppState {
 }
 
 const toMap = (assets: Asset[]) => new Map(assets.map((a) => [a.id, a]));
+
+/** 工作区里是否已有这个名字的项目（不区分大小写；归档的和「未分类」也算） */
+export function projectNameTaken(name: string, exclude?: ID): boolean {
+  return useAppStore.getState().projects.some((p) => p.id !== exclude && sameName(p.name, name));
+}
+
+/** 项目里是否已有这个名字的画布 */
+export function canvasTitleTaken(projectId: ID, title: string, exclude?: ID): boolean {
+  return useAppStore.getState().canvases.some((c) => c.projectId === projectId && c.id !== exclude && sameName(c.title, title));
+}
 
 function readFlag(key: string, fallback: boolean): boolean {
   try {
@@ -250,8 +261,13 @@ export const useAppStore = create<AppState>()((set, get) => {
     },
 
     async updateCanvas(id, patch) {
+      const before = get().canvases.find((c) => c.id === id);
       const meta = await backend.updateCanvas(id, patch);
       get().canvasSaved(meta);
+      // 移到的项目里已有同名画布时，后台自动加上了「(2)」
+      if (!patch.title && before && meta.title !== before.title) {
+        get().showToast(t("目标项目里已有「{old}」，移过去的画布改名为「{name}」", { old: before.title, name: meta.title }));
+      }
     },
 
     async deleteCanvas(id) {

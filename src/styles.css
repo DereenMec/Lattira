@@ -1855,6 +1855,19 @@ mark.hit {
 .prompt-dialog input:focus {
   border-color: var(--accent);
 }
+.prompt-dialog input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.prompt-message {
+  margin: -4px 0 12px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+.prompt-error {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: var(--danger);
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -2052,11 +2065,38 @@ mark.hit {
 .asset-table th.col-size {
   text-align: right;
 }
-.asset-table .col-refs {
-  width: 90px;
+.asset-table .col-location {
+  width: 260px;
 }
-.asset-table td.col-refs.is-unused {
+.asset-table td.col-location .is-unused {
   color: var(--warn);
+}
+/* 文件所在的项目 › 画布：点击打开那个画布 */
+.asset-location {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.asset-location .link-btn {
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.asset-location .link-btn:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.loc-more {
+  flex: none;
+  color: var(--ink-3);
 }
 
 /* 窄窗口下：页头换行而不是把文字挤断；表格保底宽度，超出时横向滚动 */

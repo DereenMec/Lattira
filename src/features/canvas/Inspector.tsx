@@ -237,7 +237,7 @@ export function Inspector({ meta }: { meta: CanvasMeta }) {
                     <dt>{t("引用")}</dt>
                     <dd>{t("{n} 个画布", { n: asset.refCount })}</dd>
                   </dl>
-                  <button className="btn" onClick={() => void openFromCanvas(asset)}>
+                  <button className="btn" onClick={() => void openFromCanvas(asset, selected[0].id)}>
                     <ExternalLink size={14} /> {t("用默认程序打开")}
                   </button>
                   {selected[0].type === "image" && isOcrMime(asset.mime) && asset.ocrText !== undefined && (

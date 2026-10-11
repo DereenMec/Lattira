@@ -177,14 +177,16 @@ fn restore_canvas(ws: &Workspace, id: &str) -> Result<CanvasMeta> {
     } else {
         ws.conn.query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| r.get(0))?
     };
+    // 删除之后项目里又有了同名画布：恢复的这个加上「(2)」
+    let title = commands::unique_canvas_title(&ws.conn, &project_id, &title, Some(id))?;
     let dir = ws.root.join("projects").join(commands::project_dir(&ws.conn, &project_id)?);
     fs::create_dir_all(&dir)?;
     let dest = files::unique_path(&dir, &files::sanitize(&title), "canvas", None);
     fs::rename(&src, &dest)?;
     // 搜索索引与资源引用由前端重新保存一次画布时重建
     ws.conn.execute(
-        "UPDATE canvases SET deleted_at = NULL, project_id = ?2, file = ?3 WHERE id = ?1",
-        params![id, project_id, ws.rel(&dest)],
+        "UPDATE canvases SET deleted_at = NULL, project_id = ?2, file = ?3, title = ?4 WHERE id = ?1",
+        params![id, project_id, ws.rel(&dest), title],
     )?;
     commands::get_canvas(&ws.conn, id)
 }

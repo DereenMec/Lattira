@@ -96,7 +96,8 @@ export function createTauriBackend(): Backend {
       opened.add(asset.id);
       return invoke<void>("open_asset", { id: asset.id });
     },
-    forkAssetForCanvas: (id, canvasId) => invoke<Asset>("fork_asset_for_canvas", { id, canvasId }),
+    forkAssetForCanvas: (id, canvasId, force = false) => invoke<Asset>("fork_asset_for_canvas", { id, canvasId, force }),
+    copyAssetAs: (id, name) => invoke<Asset>("copy_asset_as", { id, name }),
     listNewFileTypes: () => invoke<NewFileType[]>("list_new_file_types"),
     createNewFile: (ext, name) => invoke<Asset>("create_new_file", { ext, name }),
     checkAssetChanges(ids) {

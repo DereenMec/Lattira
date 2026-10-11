@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { arrangeAt, canMoveInto, FOLDER_H, FOLDER_W, withDescendants } from "@/lib/folders";
+import { arrangeAt, canMoveInto, FOLDER_H, FOLDER_W, namesAt, withDescendants } from "@/lib/folders";
+import { uniqueName } from "@/lib/names";
 import { boundsOf, center, type Point } from "@/lib/geometry";
 import { uuidv7 } from "@/lib/id";
 import { fromJsonCanvas, toJsonCanvas } from "@/lib/jsonCanvas";
@@ -27,7 +28,7 @@ interface Snapshot {
   edges: Edge[];
 }
 
-type ElementPatch = Partial<Omit<CanvasElement, "id" | "type">> & { text?: string; label?: string; assetId?: ID } & Partial<
+export type ElementPatch = Partial<Omit<CanvasElement, "id" | "type">> & { text?: string; label?: string; assetId?: ID } & Partial<
   Omit<LinkElement, "id" | "type">
 >;
 
@@ -78,17 +79,18 @@ interface CanvasState {
   reverseEdge(id: ID): void;
   /** 把选中的卡片放进一个新文件夹，文件夹放在它们原来的位置 */
   groupSelection(): void;
-  /** 把元素放进文件夹（排在已有内容后面）；不能把文件夹放进它自己或它里面的文件夹，这时返回 false */
-  moveIntoFolder(ids: ID[], folderId: ID): boolean;
+  /**
+   * 把元素放进文件夹（排在已有内容后面）；不能把文件夹放进它自己或它里面的文件夹，这时返回 false。
+   * patches：同时要改的内容（重名时改的名字），与移动记为同一步撤销。重名检查见 features/canvas/cardNames.ts
+   */
+  moveIntoFolder(ids: ID[], folderId: ID, patches?: Record<ID, ElementPatch>): boolean;
   /** 把文件夹里的元素拿到画布上，第一个的中心对准 at，其余依次排开 */
-  moveToCanvas(ids: ID[], at: Point): void;
+  moveToCanvas(ids: ID[], at: Point, patches?: Record<ID, ElementPatch>): void;
   /** 解散文件夹：里面的内容放到文件夹原来的位置（文件夹在别的文件夹里时，放进那个文件夹），删除文件夹 */
-  dissolveFolder(folderId: ID): void;
+  dissolveFolder(folderId: ID, patches?: Record<ID, ElementPatch>): void;
   openFolder(id: ID | null, focus?: ID | ID[]): void;
   /** 刚放进文件夹 folderId 的元素：那个文件夹的窗口开着时在窗口里选中它们 */
   showInOpenFolder(folderId: ID, ids: ID[]): void;
-  /** 创建副本，偏移一点放置，并复制它们之间的连线 */
-  duplicate(ids: ID[]): void;
   /** 调整叠放次序（分组框始终在普通卡片之下） */
   reorder(ids: ID[], where: "front" | "back"): void;
   align(ids: ID[], mode: AlignMode): void;
@@ -428,7 +430,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       }));
     },
 
-    moveIntoFolder(ids, folderId) {
+    moveIntoFolder(ids, folderId, patches = {}) {
       const { doc } = get();
       const folder = doc?.elements.find((e) => e.id === folderId);
       if (!doc || folder?.type !== "folder" || ids.length === 0) return false;
@@ -441,14 +443,16 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
         ...s,
         elements: [
           ...s.elements.filter((e) => !moving.has(e.id)),
-          ...s.elements.filter((e) => moving.has(e.id)).map((e) => ({ ...e, parentId: folderId, updatedAt: now })),
+          ...s.elements
+            .filter((e) => moving.has(e.id))
+            .map((e) => ({ ...e, ...patches[e.id], parentId: folderId, updatedAt: now }) as CanvasElement),
         ],
       }));
       set((s) => ({ selectedIds: s.selectedIds.filter((id) => !moving.has(id)), editingId: null }));
       return true;
     },
 
-    moveToCanvas(ids, at) {
+    moveToCanvas(ids, at, patches = {}) {
       const { doc } = get();
       if (!doc) return;
       const picked = doc.elements.filter((e) => ids.includes(e.id) && e.parentId);
@@ -461,13 +465,15 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
         ...s,
         elements: [
           ...s.elements.filter((e) => !index.has(e.id)),
-          ...picked.map((e) => ({ ...e, ...spots[index.get(e.id)!], parentId: undefined, updatedAt: now }) as CanvasElement),
+          ...picked.map(
+            (e) => ({ ...e, ...patches[e.id], ...spots[index.get(e.id)!], parentId: undefined, updatedAt: now }) as CanvasElement,
+          ),
         ],
       }));
       set({ selectedIds: picked.map((e) => e.id), selectedEdgeId: null });
     },
 
-    dissolveFolder(folderId) {
+    dissolveFolder(folderId, patches = {}) {
       const { doc } = get();
       const folder = doc?.elements.find((e) => e.id === folderId);
       if (!doc || !folder) return;
@@ -480,7 +486,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
           .filter((e) => e.id !== folderId)
           .map((e) =>
             index.has(e.id)
-              ? ({ ...e, ...spots[index.get(e.id)!], parentId: folder.parentId, updatedAt: now } as CanvasElement)
+              ? ({ ...e, ...patches[e.id], ...spots[index.get(e.id)!], parentId: folder.parentId, updatedAt: now } as CanvasElement)
               : e,
           ),
         edges: s.edges.filter((e) => e.fromId !== folderId && e.toId !== folderId),
@@ -499,28 +505,6 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
 
     showInOpenFolder(folderId, ids) {
       if (get().folderView?.id === folderId && ids.length) get().openFolder(folderId, ids);
-    },
-
-    duplicate(ids) {
-      const { doc } = get();
-      if (!doc || ids.length === 0) return;
-      const now = Date.now();
-      // 复制文件夹时连同里面的内容，副本里的元素指向复制出来的文件夹
-      const all = withDescendants(doc.elements, ids);
-      const idMap = new Map<ID, ID>();
-      const picked = doc.elements.filter((e) => all.has(e.id));
-      for (const e of picked) idMap.set(e.id, uuidv7());
-      const top = new Set(ids);
-      const copies = picked.map((e) => {
-        const offset = top.has(e.id) ? { x: e.x + 32, y: e.y + 32 } : {};
-        const parentId = e.parentId && idMap.has(e.parentId) ? idMap.get(e.parentId) : e.parentId;
-        return { ...e, ...offset, id: idMap.get(e.id)!, parentId, createdAt: now, updatedAt: now } as CanvasElement;
-      });
-      const edges = doc.edges
-        .filter((e) => idMap.has(e.fromId) && idMap.has(e.toId))
-        .map((e) => ({ ...e, id: uuidv7(), fromId: idMap.get(e.fromId)!, toId: idMap.get(e.toId)! }));
-      commit((s) => ({ elements: [...s.elements, ...copies], edges: [...s.edges, ...edges] }));
-      set({ selectedIds: copies.filter((c) => !c.parentId).map((c) => c.id), selectedEdgeId: null });
     },
 
     reorder(ids, where) {
@@ -580,10 +564,12 @@ export const useCanvasStore = create<CanvasState>()((set, get) => {
       if (!b) return;
       const c = center(b);
       const now = Date.now();
+      // 同一层里不重名：「新文件夹」已有时用「新文件夹 (2)」
+      const taken = namesAt(doc.elements, undefined, useAppStore.getState().assets, t("未命名文件夹"), new Set(chosen.map((e) => e.id)));
       const folder: FolderElement = {
         id: uuidv7(),
         type: "folder",
-        label: t("新文件夹"),
+        label: uniqueName(t("新文件夹"), taken),
         x: c.x - FOLDER_W / 2,
         y: c.y - FOLDER_H / 2,
         width: FOLDER_W,

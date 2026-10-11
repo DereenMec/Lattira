@@ -84,7 +84,9 @@ export interface Backend {
    * 各画布独立：画布 canvasId 要打开或重命名文件前调用。文件还被其他画布用着时复制一份只给这个画布用并返回副本，
    * 否则原样返回
    */
-  forkAssetForCanvas(id: ID, canvasId: ID): Promise<Asset>;
+  forkAssetForCanvas(id: ID, canvasId: ID, force?: boolean): Promise<Asset>;
+  /** 复制一份文件作为独立的资源并改名（粘贴、导入时重名改名，就地复制时加「_副本」）；不写扩展名时沿用原来的 */
+  copyAssetAs(id: ID, name: string): Promise<Asset>;
   /** 系统右键菜单「新建」里能新建的文件类型（与资源管理器一致） */
   listNewFileTypes(): Promise<NewFileType[]>;
   /** 按系统「新建」的方式新建一个文件放进工作区；新建的文件不和内容相同的文件合并 */

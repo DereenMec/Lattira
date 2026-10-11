@@ -7,7 +7,7 @@ import { useT } from "@/i18n";
 import { displayCombo } from "@/lib/shortcuts";
 import { useUpdater } from "@/services/updater";
 import { shortcutOf, useSettings } from "@/store/settingsStore";
-import { inboxOf, useAppStore, type View } from "@/store/appStore";
+import { inboxOf, projectNameTaken, useAppStore, type View } from "@/store/appStore";
 import type { ID } from "@/types/model";
 import { useCanvasDrag } from "./canvasDrag";
 import { Splitter } from "./Splitter";
@@ -36,11 +36,19 @@ export function Sidebar() {
     `nav-item${currentProjectId === id ? " is-active" : ""}${dragging ? " is-drop-target" : ""}${dropOver?.kind === "project" && dropOver.id === id ? " is-drop-over" : ""}`;
   const keyHint = (combo: string | null) => (combo ? ` (${displayCombo(combo)})` : "");
 
-  const submit = async () => {
+  /** 回车时重名：提示后继续编辑；失去焦点时重名：提示后放弃 */
+  const submit = async (fromBlur = false) => {
     const trimmed = name.trim();
+    const app = useAppStore.getState();
+    if (trimmed && projectNameTaken(trimmed)) {
+      app.showToast(t("已经有名为「{name}」的项目，换一个名字吧", { name: trimmed }));
+      if (!fromBlur) return;
+    }
     setCreating(false);
     setName("");
-    if (trimmed) await useAppStore.getState().createProject(trimmed);
+    if (trimmed && !projectNameTaken(trimmed)) {
+      await app.createProject(trimmed).catch((e) => app.showToast(t("新建项目失败：{error}", { error: String(e) })));
+    }
   };
 
   return (
@@ -102,7 +110,7 @@ export function Sidebar() {
           placeholder={t("项目名称")}
           value={name}
           onChange={(e) => setName(e.target.value)}
-          onBlur={() => void submit()}
+          onBlur={() => void submit(true)}
           onKeyDown={(e) => {
             if (e.key === "Enter") void submit();
             if (e.key === "Escape") {

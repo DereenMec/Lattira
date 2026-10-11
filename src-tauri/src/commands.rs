@@ -84,6 +84,8 @@ pub struct Asset {
     /// 图片中识别出的文字；None 表示尚未识别或不适用
     ocr_text: Option<String>,
     ref_count: i64,
+    /// 引用它的画布（不含回收站里的），资源库据此显示所在的项目和画布
+    canvas_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -138,6 +140,8 @@ const PROJECT_COLS: &str = "id, name, color, is_inbox, pinned, archived, created
 const CANVAS_COLS: &str = "id, project_id, title, element_count, created_at, updated_at, preview";
 const ASSET_SELECT: &str = "SELECT a.id, a.hash, a.path, a.name, a.mime, a.size, a.width, a.height, a.imported_at, a.ocr_text,
     (SELECT COUNT(*) FROM asset_refs r JOIN canvases c ON c.id = r.canvas_id
+      WHERE r.asset_id = a.id AND c.deleted_at IS NULL),
+    (SELECT GROUP_CONCAT(r.canvas_id) FROM asset_refs r JOIN canvases c ON c.id = r.canvas_id
       WHERE r.asset_id = a.id AND c.deleted_at IS NULL)
   FROM assets a";
 
@@ -180,7 +184,55 @@ fn asset_row(r: &Row) -> rusqlite::Result<Asset> {
         imported_at: r.get(8)?,
         ocr_text: r.get(9)?,
         ref_count: r.get(10)?,
+        canvas_ids: r
+            .get::<_, Option<String>>(11)?
+            .map(|ids| ids.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// 名字不重复：项目名在工作区里唯一，画布名在所属项目里唯一。与 Windows 文件名一样，比较时去掉首尾空白、不区分大小写
+// ---------------------------------------------------------------------------
+
+pub(crate) fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+/// 第 n 个候选名：「名字」「名字 (2)」「名字 (3)」……
+fn numbered(base: &str, n: usize) -> String {
+    if n <= 1 { base.to_string() } else { format!("{base} ({n})") }
+}
+
+fn project_name_taken(conn: &Connection, name: &str, exclude: Option<&str>) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT id, name FROM projects")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, existing) = row?;
+        if Some(id.as_str()) != exclude && same_name(&existing, name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn canvas_titles(conn: &Connection, project_id: &str, exclude: Option<&str>) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id, title FROM canvases WHERE project_id = ?1 AND deleted_at IS NULL")?;
+    let rows = stmt.query_map([project_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, title) = row?;
+        if Some(id.as_str()) != exclude {
+            out.push(title);
+        }
+    }
+    Ok(out)
+}
+
+/// 项目里没有被占用的画布名：新建、移动、导入、从回收站恢复时重名就加上「(2)」
+pub(crate) fn unique_canvas_title(conn: &Connection, project_id: &str, title: &str, exclude: Option<&str>) -> Result<String> {
+    let taken = canvas_titles(conn, project_id, exclude)?;
+    Ok((1..).map(|n| numbered(title, n)).find(|t| !taken.iter().any(|x| same_name(x, t))).unwrap_or_default())
 }
 
 fn get_project(conn: &Connection, id: &str) -> Result<Project> {
@@ -265,6 +317,9 @@ pub async fn create_project(state: State<'_, AppState>, name: String, color: Str
         if name.is_empty() {
             return Err(Error::Invalid("项目名称不能为空".into()));
         }
+        if project_name_taken(&ws.conn, name, None)? {
+            return Err(Error::Invalid(format!("已经有名为「{name}」的项目")));
+        }
         let dir = files::unique_path(&ws.root.join("projects"), &files::sanitize(name), "", None);
         fs::create_dir_all(&dir)?;
         let dir_name = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -289,6 +344,9 @@ pub async fn update_project(state: State<'_, AppState>, id: String, patch: Proje
             return Err(Error::Invalid("收件箱不能重命名或归档".into()));
         }
         if let Some(name) = patch.name.as_deref().map(str::trim).filter(|n| !n.is_empty() && *n != current.name) {
+            if project_name_taken(&ws.conn, name, Some(&id))? {
+                return Err(Error::Invalid(format!("已经有名为「{name}」的项目")));
+            }
             let projects = ws.root.join("projects");
             let old_abs = projects.join(&old_dir);
             let target = files::unique_path(&projects, &files::sanitize(name), "", Some(&old_abs));
@@ -340,7 +398,8 @@ pub async fn list_canvases(state: State<'_, AppState>) -> Result<Vec<CanvasMeta>
 pub async fn create_canvas(state: State<'_, AppState>, project_id: String, title: String) -> Result<CanvasMeta> {
     state.with(|ws| {
         let title = title.trim();
-        let title = if title.is_empty() { "未命名画布" } else { title };
+        let title = unique_canvas_title(&ws.conn, &project_id, if title.is_empty() { "未命名画布" } else { title }, None)?;
+        let title = title.as_str();
         let dir = ws.root.join("projects").join(project_dir(&ws.conn, &project_id)?);
         fs::create_dir_all(&dir)?;
         let path = files::unique_path(&dir, &files::sanitize(title), "canvas", None);
@@ -361,8 +420,19 @@ pub async fn update_canvas(state: State<'_, AppState>, id: String, patch: Canvas
     state.with(|ws| {
         let current = get_canvas(&ws.conn, &id)?;
         let old_abs = ws.abs(&canvas_file(&ws.conn, &id)?);
-        let title = patch.title.as_deref().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(&current.title).to_string();
+        let renamed = patch.title.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != current.title);
         let project_id = patch.project_id.unwrap_or(current.project_id.clone());
+        // 改名时重名不允许；只是移到其他项目而那里已有同名画布时，自动加上「(2)」
+        let title = match renamed {
+            Some(t) => {
+                if canvas_titles(&ws.conn, &project_id, Some(&id))?.iter().any(|x| same_name(x, t)) {
+                    return Err(Error::Invalid(format!("项目里已经有名为「{t}」的画布")));
+                }
+                t.to_string()
+            }
+            None if project_id != current.project_id => unique_canvas_title(&ws.conn, &project_id, &current.title, Some(&id))?,
+            None => current.title.clone(),
+        };
 
         let mut file_abs = old_abs.clone();
         if title != current.title || project_id != current.project_id {
@@ -952,32 +1022,39 @@ pub async fn check_asset_changes(app: AppHandle, state: State<'_, AppState>, ids
 }
 
 /// 各画布独立：画布 canvas_id 要打开（编辑）或重命名文件 id 时调用。
-/// 文件还被其他画布用着时，给这个画布复制一份（内容相同，图中文字沿用）并返回副本，之后在这个画布上的修改不会影响其他画布；
-/// 只有这个画布在用时原样返回。复制大文件时不持有工作区锁
-fn fork_for_canvas(state: &AppState, id: &str, canvas_id: &str) -> Result<Asset> {
-    let (root, asset, reserved) = state.with(|ws| {
+/// 文件还被其他画布用着（或 force：这个画布上的其他卡片也在用）时复制一份（内容相同，图中文字沿用）并返回副本，
+/// 之后的修改不会影响其他地方；否则原样返回。复制大文件时不持有工作区锁
+fn fork_for_canvas(state: &AppState, id: &str, canvas_id: &str, force: bool) -> Result<Asset> {
+    let (asset, others) = state.with(|ws| {
         let asset = get_asset(&ws.conn, "id", id)?.ok_or_else(|| Error::NotFound("资源", id.into()))?;
-        // 回收站里的画布也算：恢复之后它看到的应该还是原来的文件
+        // 画布删除时引用记录一起删掉，回收站里的画布不算在内
         let others: i64 = ws.conn.query_row(
             "SELECT COUNT(*) FROM asset_refs WHERE asset_id = ?1 AND canvas_id <> ?2",
             params![id, canvas_id],
             |r| r.get(0),
         )?;
-        if others == 0 {
-            return Ok((ws.root.clone(), asset, None));
-        }
-        // 先建好空文件占住文件名，同时进行的导入不会分到同一个名字
-        let dest = asset_destination(ws, &asset.name)?;
-        fs::File::create(&dest)?;
-        let src = ws.abs(&asset.path);
-        Ok((ws.root.clone(), asset, Some((src, dest))))
+        Ok((asset, others))
     })?;
-    let Some((src, dest)) = reserved else { return Ok(asset) };
-    let forked = fs::copy(&src, &dest).map_err(Error::from).and_then(|_| {
+    if others == 0 && !force {
+        return Ok(asset);
+    }
+    let name = asset.name.clone();
+    copy_asset(state, &asset, &name)
+}
+
+/// 复制一份文件作为独立的资源，显示名为 name（内容相同，图中文字沿用）。复制大文件时不持有工作区锁
+fn copy_asset(state: &AppState, asset: &Asset, name: &str) -> Result<Asset> {
+    let (root, src, dest) = state.with(|ws| {
+        // 先建好空文件占住文件名，同时进行的导入不会分到同一个名字
+        let dest = asset_destination(ws, name)?;
+        fs::File::create(&dest)?;
+        Ok((ws.root.clone(), ws.abs(&asset.path), dest))
+    })?;
+    let copied = fs::copy(&src, &dest).map_err(Error::from).and_then(|_| {
         let hash = hash_file(&dest)?;
         with_root(state, &root, |ws| {
-            // 副本只属于这个画布：导入内容相同的文件时仍然用原来那份
-            let copy = insert_asset(ws, &hash, &dest, &asset.name, true)?;
+            // 副本是独立的：导入内容相同的文件时仍然用原来那份
+            let copy = insert_asset(ws, &hash, &dest, name, true)?;
             ws.conn.execute(
                 "UPDATE assets SET ocr_text = (SELECT ocr_text FROM assets WHERE id = ?2) WHERE id = ?1",
                 params![copy.id, asset.id],
@@ -985,15 +1062,23 @@ fn fork_for_canvas(state: &AppState, id: &str, canvas_id: &str) -> Result<Asset>
             get_asset(&ws.conn, "id", &copy.id)?.ok_or_else(|| Error::NotFound("资源", copy.id.clone()))
         })
     });
-    if forked.is_err() {
+    if copied.is_err() {
         let _ = fs::remove_file(&dest);
     }
-    forked
+    copied
+}
+
+/// 复制一份文件并改名（粘贴、导入时重名改名，就地复制时加「_副本」）；不写扩展名时沿用原来的
+#[tauri::command]
+pub async fn copy_asset_as(state: State<'_, AppState>, id: String, name: String) -> Result<Asset> {
+    let asset = state.with(|ws| get_asset(&ws.conn, "id", &id)?.ok_or_else(|| Error::NotFound("资源", id.clone())))?;
+    let name = requested_name(&name, &asset.name)?;
+    copy_asset(&state, &asset, &name)
 }
 
 #[tauri::command]
-pub async fn fork_asset_for_canvas(state: State<'_, AppState>, id: String, canvas_id: String) -> Result<Asset> {
-    fork_for_canvas(&state, &id, &canvas_id)
+pub async fn fork_asset_for_canvas(state: State<'_, AppState>, id: String, canvas_id: String, force: bool) -> Result<Asset> {
+    fork_for_canvas(&state, &id, &canvas_id, force)
 }
 
 /// Windows 右键菜单「新建」里能新建的文件类型，见 shellnew.rs
@@ -1094,6 +1179,27 @@ pub async fn rename_asset(state: State<'_, AppState>, id: String, name: String) 
     state.with(|ws| rename_asset_in(ws, &id, &name))
 }
 
+fn display_name(stem: &str, ext: &str) -> String {
+    let stem = files::sanitize(stem);
+    if ext.is_empty() { stem } else { format!("{stem}.{}", files::sanitize(ext)) }
+}
+
+/// 用户输入的文件名；没写扩展名时沿用原来的扩展名
+fn requested_name(name: &str, old_name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("文件名不能为空".into()));
+    }
+    let wanted = Path::new(name);
+    Ok(match wanted.extension() {
+        Some(ext) => display_name(&wanted.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default(), &ext.to_string_lossy()),
+        None => {
+            let old_ext = Path::new(old_name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+            display_name(name, &old_ext)
+        }
+    })
+}
+
 fn rename_asset_in(ws: &Workspace, id: &str, name: &str) -> Result<Asset> {
     let asset = get_asset(&ws.conn, "id", id)?.ok_or_else(|| Error::NotFound("资源", id.into()))?;
     let name = name.trim();
@@ -1116,12 +1222,13 @@ fn rename_asset_in(ws: &Workspace, id: &str, name: &str) -> Result<Asset> {
     if target != old_abs {
         fs::rename(&old_abs, &target)?;
     }
-    let file_name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // 显示的名字用用户起的名字；磁盘上的文件名在同一个月的文件夹里重名时会加上「(2)」
+    let display = display_name(&stem, &ext);
     let rel = ws.rel(&target);
-    let mime = mime_guess::from_path(&file_name).first_or_octet_stream().essence_str().to_string();
+    let mime = mime_guess::from_path(&display).first_or_octet_stream().essence_str().to_string();
     ws.conn.execute(
         "UPDATE assets SET name = ?2, path = ?3, mime = ?4 WHERE id = ?1",
-        params![id, file_name, rel, mime],
+        params![id, display, rel, mime],
     )?;
 
     // 画布文件里的 file 字段供 Obsidian 等工具使用，一并更新
@@ -1423,6 +1530,41 @@ mod tests {
     use super::*;
 
 
+    /// 项目名在工作区里唯一，画布名在项目里唯一（不区分大小写、忽略首尾空白）
+    #[test]
+    fn project_and_canvas_names_are_unique() {
+        let dir = std::env::temp_dir().join(format!("lattira-names-{}", new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (ws, _) = Workspace::open(&dir).unwrap();
+        let inbox: String = ws.conn.query_row("SELECT id FROM projects WHERE is_inbox = 1", [], |r| r.get(0)).unwrap();
+        let inbox_name: String = ws.conn.query_row("SELECT name FROM projects WHERE id = ?1", [&inbox], |r| r.get(0)).unwrap();
+        assert!(project_name_taken(&ws.conn, &format!(" {inbox_name} "), None).unwrap());
+        assert!(!project_name_taken(&ws.conn, &inbox_name, Some(&inbox)).unwrap());
+        assert!(!project_name_taken(&ws.conn, "竞品分析", None).unwrap());
+
+        for (id, title) in [("c1", "Notes"), ("c2", "未命名画布"), ("c3", "未命名画布 (2)")] {
+            ws.conn
+                .execute(
+                    "INSERT INTO canvases (id, project_id, title, file, created_at, updated_at) VALUES (?1, ?2, ?3, '', 0, 0)",
+                    params![id, inbox, title],
+                )
+                .unwrap();
+        }
+        // 回收站里的画布不占名字
+        ws.conn
+            .execute(
+                "INSERT INTO canvases (id, project_id, title, file, created_at, updated_at, deleted_at) VALUES ('c4', ?1, '旧画布', '', 0, 0, 1)",
+                [&inbox],
+            )
+            .unwrap();
+        assert_eq!(unique_canvas_title(&ws.conn, &inbox, "notes", None).unwrap(), "notes (2)");
+        assert_eq!(unique_canvas_title(&ws.conn, &inbox, "未命名画布", None).unwrap(), "未命名画布 (3)");
+        assert_eq!(unique_canvas_title(&ws.conn, &inbox, "Notes", Some("c1")).unwrap(), "Notes");
+        assert_eq!(unique_canvas_title(&ws.conn, &inbox, "旧画布", None).unwrap(), "旧画布");
+        drop(ws);
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// 各画布独立：被其他画布用着的文件给当前画布复制一份，只有当前画布在用时不复制
     #[test]
     fn fork_copies_only_shared_files() {
@@ -1439,7 +1581,7 @@ mod tests {
         *state.ws.lock().unwrap() = Some(ws);
 
         // B 也在用：给 A 复制一份，内容相同、文件不同，导入相同内容时仍用原来那份
-        let copy = fork_for_canvas(&state, &asset.id, "A").unwrap();
+        let copy = fork_for_canvas(&state, &asset.id, "A", false).unwrap();
         assert_ne!(copy.id, asset.id);
         assert_eq!(copy.name, asset.name);
         state
@@ -1455,8 +1597,10 @@ mod tests {
             .unwrap();
 
         // 副本只有 A 在用、原件只有 B 在用：都不再复制
-        assert_eq!(fork_for_canvas(&state, &copy.id, "A").unwrap().id, copy.id);
-        assert_eq!(fork_for_canvas(&state, &asset.id, "B").unwrap().id, asset.id);
+        assert_eq!(fork_for_canvas(&state, &copy.id, "A", false).unwrap().id, copy.id);
+        assert_eq!(fork_for_canvas(&state, &asset.id, "B", false).unwrap().id, asset.id);
+        // 同一个画布上的另一张卡片也在用：强制复制
+        assert_ne!(fork_for_canvas(&state, &asset.id, "B", true).unwrap().id, asset.id);
 
         drop(state);
         fs::remove_dir_all(&dir).ok();

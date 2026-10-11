@@ -238,6 +238,8 @@ fn import_canvas_file(ws: &Workspace, project_id: &str, path: &Path, scope: Opti
 
     let title = path.file_stem().map(|s| s.to_string_lossy().trim().to_string()).filter(|s| !s.is_empty());
     let title = title.unwrap_or_else(|| "导入的画布".into());
+    // 项目里已有同名画布时加上「(2)」
+    let title = commands::unique_canvas_title(&ws.conn, project_id, &title, None)?;
     let dir = ws.root.join("projects").join(commands::project_dir(&ws.conn, project_id)?);
     fs::create_dir_all(&dir)?;
     let dest = files::unique_path(&dir, &files::sanitize(&title), "canvas", None);

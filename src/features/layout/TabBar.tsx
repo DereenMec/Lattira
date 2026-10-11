@@ -6,7 +6,7 @@ import { canvasMenu } from "@/features/menu/menus";
 import { ProjectIcon } from "@/features/project/projectIcons";
 import { t, useT } from "@/i18n";
 import { displayCombo } from "@/lib/shortcuts";
-import { useAppStore } from "@/store/appStore";
+import { canvasTitleTaken, useAppStore } from "@/store/appStore";
 import { shortcutOf } from "@/store/settingsStore";
 import type { CanvasMeta, ID } from "@/types/model";
 import { consumeDragClick, startCanvasDrag } from "./canvasDrag";
@@ -35,6 +35,10 @@ function TabTitleEditor({ meta, onDone }: { meta: CanvasMeta; onDone(): void }) 
   const commit = () => {
     onDone();
     const title = value.trim();
+    if (title && title !== meta.title && canvasTitleTaken(meta.projectId, title, meta.id)) {
+      app().showToast(t("项目里已经有名为「{name}」的画布", { name: title }));
+      return;
+    }
     if (title && title !== meta.title) {
       void app()
         .updateCanvas(meta.id, { title })

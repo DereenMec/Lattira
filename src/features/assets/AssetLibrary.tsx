@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, LayoutGrid, List, Search, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, LayoutGrid, List, LocateFixed, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { openContextMenu, type MenuEntry } from "@/features/menu/ContextMenu";
 import { assetEntries } from "@/features/menu/menus";
@@ -8,13 +8,13 @@ import { fileIconUrl } from "@/lib/fileIcons";
 import { fileExtension, formatBytes, isImageMime } from "@/lib/format";
 import { backend } from "@/services/backend";
 import { confirmAction } from "@/services/confirm";
-import { useAppStore } from "@/store/appStore";
+import { projectLabel, useAppStore } from "@/store/appStore";
 import { dropCanvasCache, useCanvasStore } from "@/store/canvasStore";
-import type { Asset, ID } from "@/types/model";
+import type { Asset, CanvasMeta, ID, Project } from "@/types/model";
 
 type Filter = "all" | "image" | "document" | "unused";
 type Layout = "grid" | "list";
-type SortKey = "name" | "type" | "size" | "importedAt" | "refCount";
+type SortKey = "name" | "type" | "size" | "importedAt" | "location";
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "all", label: msg("全部") },
@@ -28,8 +28,50 @@ const COLUMNS: { key: SortKey; label: string; className: string }[] = [
   { key: "importedAt", label: msg("导入时间"), className: "col-date" },
   { key: "type", label: msg("类型"), className: "col-type" },
   { key: "size", label: msg("大小"), className: "col-size" },
-  { key: "refCount", label: msg("引用"), className: "col-refs" },
+  { key: "location", label: msg("所在位置"), className: "col-location" },
 ];
+
+/** 文件所在的一个画布：项目 › 画布 */
+interface Location {
+  canvasId: ID;
+  label: string;
+}
+
+/** 文件在哪些画布上（按项目、画布名排序）；画布已删除或不在列表里的不算 */
+function locationsOf(a: Asset, canvases: ReadonlyMap<ID, CanvasMeta>, projects: ReadonlyMap<ID, Project>): Location[] {
+  return a.canvasIds
+    .flatMap((id) => {
+      const c = canvases.get(id);
+      if (!c) return [];
+      const p = projects.get(c.projectId);
+      return [{ canvasId: id, label: `${p ? projectLabel(p) : ""} › ${c.title}` }];
+    })
+    .sort((x, y) => x.label.localeCompare(y.label, "zh-CN"));
+}
+
+/** 打开文件所在的画布，并定位到用这个文件的卡片 */
+const reveal = (a: Asset, canvasId: ID) => useAppStore.getState().navigate({ kind: "canvas", canvasId, focusAssetId: a.id });
+
+/** 位置一栏：第一个画布（可点击跳过去），还有其他画布时显示「等 N 个画布」，悬停看全部 */
+function LocationCell({ asset, locations }: { asset: Asset; locations: Location[] }) {
+  const t = useT();
+  if (locations.length === 0) return <span className="is-unused">{t("未被引用")}</span>;
+  return (
+    <span className="asset-location" title={locations.map((l) => l.label).join("\n")}>
+      <button
+        className="link-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          reveal(asset, locations[0].canvasId);
+        }}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        {locations[0].label}
+      </button>
+      {locations.length > 1 && <span className="loc-more">{t("等 {n} 个画布", { n: locations.length })}</span>}
+    </span>
+  );
+}
 
 const LAYOUT_KEY = "lattira.assets.layout";
 
@@ -38,8 +80,9 @@ const matchesFilter = (a: Asset, f: Filter) =>
 
 const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, "");
 
-/** 搜索文件名、扩展名和图片中识别出的文字 */
-const matchesQuery = (a: Asset, q: string) => !q || normalize(`${a.name}${a.ocrText ?? ""}`).includes(q);
+/** 搜索文件名、扩展名、图片中识别出的文字和所在的项目、画布 */
+const matchesQuery = (a: Asset, q: string, where: Location[]) =>
+  !q || normalize(`${a.name}${a.ocrText ?? ""}${where.map((l) => l.label).join("")}`).includes(q);
 
 const typeLabel = (a: Asset) => {
   const ext = fileExtension(a.name).toUpperCase();
@@ -59,6 +102,8 @@ const isTyping = (t: EventTarget | null) => t instanceof HTMLElement && !!t.clos
 export function AssetLibrary() {
   useT();
   const assets = useAppStore((s) => s.assets);
+  const canvasList = useAppStore((s) => s.canvases);
+  const projectList = useAppStore((s) => s.projects);
   const [filter, setFilter] = useState<Filter>("all");
   const [layout, setLayout] = useState<Layout>(readLayout);
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "importedAt", desc: true });
@@ -80,11 +125,22 @@ export function AssetLibrary() {
   };
 
   const all = useMemo(() => [...assets.values()], [assets]);
+  const locations = useMemo(() => {
+    const canvases = new Map(canvasList.map((c) => [c.id, c]));
+    const projects = new Map(projectList.map((p) => [p.id, p]));
+    return new Map(all.map((a) => [a.id, locationsOf(a, canvases, projects)]));
+  }, [all, canvasList, projectList]);
   const list = useMemo(() => {
     const q = normalize(query);
-    const rows = all.filter((a) => matchesFilter(a, filter) && matchesQuery(a, q));
+    const rows = all.filter((a) => matchesFilter(a, filter) && matchesQuery(a, q, locations.get(a.id) ?? []));
     const value = (a: Asset): string | number =>
-      sort.key === "name" ? a.name : sort.key === "type" ? typeLabel(a) : a[sort.key];
+      sort.key === "name"
+        ? a.name
+        : sort.key === "type"
+          ? typeLabel(a)
+          : sort.key === "location"
+            ? (locations.get(a.id)?.[0]?.label ?? "")
+            : a[sort.key];
     rows.sort((a, b) => {
       const x = value(a);
       const y = value(b);
@@ -92,7 +148,7 @@ export function AssetLibrary() {
       return sort.desc ? -c : c;
     });
     return rows;
-  }, [all, filter, sort, query]);
+  }, [all, filter, sort, query, locations]);
   const total = all.reduce((sum, a) => sum + a.size, 0);
 
   // 已经不在列表里的（被删除或被筛掉）不再算选中
@@ -175,7 +231,18 @@ export function AssetLibrary() {
       danger: true,
       onSelect: () => void deleteAssets(ids),
     };
-    openContextMenu(e, ids.length > 1 ? [remove] : [...assetEntries(asset), "separator", remove]);
+    const where = locations.get(asset.id) ?? [];
+    const inCanvas: MenuEntry[] = where.length
+      ? [
+          {
+            label: t("在画布中查看"),
+            icon: <LocateFixed size={15} />,
+            children: where.map((l) => ({ label: l.label, onSelect: () => reveal(asset, l.canvasId) })),
+          },
+          "separator",
+        ]
+      : [];
+    openContextMenu(e, ids.length > 1 ? [remove] : [...inCanvas, ...assetEntries(asset), "separator", remove]);
   };
 
   // 资源库页面的快捷键：Ctrl+A 全选、Delete 删除、Esc 取消选择
@@ -294,7 +361,7 @@ export function AssetLibrary() {
                 {formatBytes(a.size)} · {formatRelative(a.importedAt)}
               </div>
               <div className={`asset-refs${a.refCount === 0 ? " is-unused" : ""}`}>
-                {a.refCount === 0 ? t("未被引用") : t("{n} 个画布引用", { n: a.refCount })}
+                <LocationCell asset={a} locations={locations.get(a.id) ?? []} />
               </div>
             </button>
           ))}
@@ -328,8 +395,8 @@ export function AssetLibrary() {
                   <td className="col-date">{new Date(a.importedAt).toLocaleString("zh-CN", { hour12: false })}</td>
                   <td className="col-type">{typeLabel(a)}</td>
                   <td className="col-size">{formatBytes(a.size)}</td>
-                  <td className={`col-refs${a.refCount === 0 ? " is-unused" : ""}`}>
-                    {a.refCount === 0 ? t("未被引用") : a.refCount}
+                  <td className="col-location">
+                    <LocationCell asset={a} locations={locations.get(a.id) ?? []} />
                   </td>
                 </tr>
               ))}

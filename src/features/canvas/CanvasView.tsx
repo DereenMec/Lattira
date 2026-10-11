@@ -42,7 +42,8 @@ import { useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasElement, ID, Viewport } from "@/types/model";
 import { EdgeLayer } from "./EdgeLayer";
 import { ElementView, type ElementHandlers } from "./ElementView";
-import { copySelection, cutSelection, pasteIntoCanvas } from "./clipboard";
+import { folderRenameError, moveIntoFolderNamed, newFolderLabel, resolveIncoming } from "./cardNames";
+import { copySelection, cutSelection, duplicateCards, pasteIntoCanvas } from "./clipboard";
 import { FindBar, findMatches } from "./FindBar";
 import { FolderPanel } from "./FolderPanel";
 import { newMenuEntry } from "./newFiles";
@@ -317,7 +318,12 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       const imported = await runImport(load, { done: (a) => importedMessage(a.length) });
       if (!imported?.length) return;
       app().addAssets(imported);
-      const cards = elementsForAssets(imported, at).map((el) => (parentId ? { ...el, parentId } : el));
+      // 与这一层已有的文件、文件夹重名时要求改名
+      const cards = await resolveIncoming(
+        elementsForAssets(imported, at).map((el) => (parentId ? { ...el, parentId } : el)),
+        parentId,
+        "ask",
+      );
       canvas().addElements(cards, { select: !parentId });
       if (parentId) {
         flash(parentId);
@@ -339,7 +345,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       const assets = assetsInTree(nodes);
       if (assets.length === 0 && nodes.length === 0) return;
       app().addAssets(assets);
-      const added = elementsForTree(nodes, at, parentId);
+      const added = await resolveIncoming(elementsForTree(nodes, at, parentId), parentId, "ask");
       canvas().addElements(added, { select: !parentId });
       if (parentId) {
         flash(parentId);
@@ -551,7 +557,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         void (key === "x" ? cutSelection() : copySelection());
       } else if (mod && key === "d") {
         e.preventDefault();
-        s.duplicate(s.selectedIds);
+        void duplicateCards(s.selectedIds);
       } else if (key === "t" && !mod) {
         s.addElements([newTextCard(viewCenterWorld())], { edit: true });
         e.preventDefault();
@@ -667,7 +673,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       else {
         const asset = app().assets.get(el.assetId);
         if (!asset) app().showToast(t("找不到这个文件"));
-        else void openFromCanvas(asset);
+        else void openFromCanvas(asset, id);
       }
     },
     onContextMenu(e, id) {
@@ -688,7 +694,10 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
           s.updateElements({ [id]: { text: value } });
         }
       } else if (el.type === "folder" && value !== el.label) {
-        s.updateElements({ [id]: { label: value } });
+        // 同一层里已有这个名字：保留原来的名字
+        const error = folderRenameError(el, value);
+        if (error) app().showToast(error);
+        else s.updateElements({ [id]: { label: value } });
       }
     },
   };
@@ -787,7 +796,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
       if (into) {
         // 卡片先回到原位再放进文件夹，撤销时一步回到拖动前
         s.cancelGesture();
-        if (s.moveIntoFolder([...g.origins.keys()], into)) flash(into);
+        void moveIntoFolderNamed([...g.origins.keys()], into).then((moved) => moved && flash(into));
       } else {
         s.endGesture();
       }
@@ -819,7 +828,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         at,
         textHint: t("双击"),
         text: () => canvas().addElements([newTextCard(at)], { edit: true }),
-        folder: () => canvas().addElements([newFolder(at)], { edit: true }),
+        folder: () => canvas().addElements([newFolder(at, undefined, newFolderLabel())], { edit: true }),
         link: () => void promptLink(at),
       }),
       "separator",
@@ -1071,7 +1080,7 @@ export function CanvasView({ canvasId, focusElementId, focusAssetId, findQuery }
         onAddFiles={() => void pickFiles()}
         onAddLink={() => void promptLink(viewCenterWorld())}
         onAddFolder={() => void pickFiles(undefined, true)}
-        onNewFolder={() => canvas().addElements([newFolder(viewCenterWorld())], { edit: true })}
+        onNewFolder={() => canvas().addElements([newFolder(viewCenterWorld(), undefined, newFolderLabel())], { edit: true })}
         onGroup={() => canvas().groupSelection()}
         onZoom={zoomBy}
         onFit={fitAll}

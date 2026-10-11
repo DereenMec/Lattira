@@ -13,6 +13,8 @@ import { backend } from "@/services/backend";
 import { useAppStore } from "@/store/appStore";
 import { useCanvasStore } from "@/store/canvasStore";
 import type { ID, NewFileType } from "@/types/model";
+import { uniqueName } from "@/lib/names";
+import { nameError, namesAt } from "./cardNames";
 import { elementsForAssets } from "./placement";
 
 const S = 15;
@@ -32,19 +34,18 @@ export function loadNewFileTypes(): Promise<void> {
   return loading;
 }
 
-/** 不和工作区里已有的文件重名：「新建 文本文档.txt」已有时用「新建 文本文档 (2).txt」，与资源管理器一致 */
-function suggestName(stem: string, ext: string): string {
-  const taken = new Set([...useAppStore.getState().assets.values()].map((a) => a.name.toLowerCase()));
-  for (let n = 1; ; n++) {
-    const name = `${n === 1 ? stem : `${stem} (${n})`}${ext}`;
-    if (!taken.has(name.toLowerCase())) return name;
-  }
-}
-
-/** 新建一个文件，卡片放在 at（中心对准）或放进文件夹 parentId */
+/**
+ * 新建一个文件，卡片放在 at（中心对准）或放进文件夹 parentId。
+ * 不和这一层已有的文件、文件夹重名：默认名「新建 文本文档.txt」已有时用「新建 文本文档 (2).txt」，与资源管理器一致
+ */
 async function createFile(type: NewFileType, at: Point, parentId?: ID) {
   const label = t("新建 {type}", { type: type.name });
-  const name = await promptText(label, suggestName(label, type.ext), { selectStem: true });
+  const taken = namesAt(parentId);
+  const name = await promptText(label, uniqueName(`${label}${type.ext}`, taken, { ext: true }), {
+    selectStem: true,
+    // 与后台一致：没以这个扩展名结尾时补上
+    validate: (v) => nameError(v.toLowerCase().endsWith(type.ext) ? v : `${v}${type.ext}`, taken),
+  });
   if (name === null) return;
   try {
     const asset = await backend.createNewFile(type.ext, name);
