@@ -15,10 +15,12 @@ import { projectLabel, useAppStore } from "@/store/appStore";
 import { dropCanvasCache, useCanvasStore } from "@/store/canvasStore";
 import type { Asset, CanvasMeta, ID, Project } from "@/types/model";
 import { loadLocationIndexes, type AssetLocation, type LocationIndex } from "./assetLocations";
+import { clampColumnWidth, readColumnWidths, saveColumnWidths, type AssetColumn } from "./assetColumns";
+import { ColumnResizer } from "./ColumnResizer";
 
 type Filter = "all" | "image" | "document" | "unused";
 type Layout = "grid" | "list";
-type SortKey = "name" | "type" | "size" | "importedAt" | "location";
+type SortKey = AssetColumn;
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "all", label: msg("全部") },
@@ -138,6 +140,8 @@ export function AssetLibrary() {
   const [indexes, setIndexes] = useState<ReadonlyMap<ID, LocationIndex | null>>(new Map());
   const [filter, setFilter] = useState<Filter>("all");
   const [layout, setLayout] = useState<Layout>(readLayout);
+  const [columnWidths, setColumnWidths] = useState(readColumnWidths);
+  const columnWidthsRef = useRef(columnWidths);
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "importedAt", desc: true });
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<ID>>(new Set());
@@ -154,6 +158,13 @@ export function AssetLibrary() {
     } catch {
       // 只影响下次打开时的默认视图
     }
+  };
+
+  const resizeColumn = (column: AssetColumn, width: number, persist: boolean) => {
+    const next = { ...columnWidthsRef.current, [column]: clampColumnWidth(column, width) };
+    columnWidthsRef.current = next;
+    setColumnWidths(next);
+    if (persist) saveColumnWidths(next);
   };
 
   const all = useMemo(() => [...assets.values()], [assets]);
@@ -428,13 +439,19 @@ export function AssetLibrary() {
         </div>
       ) : (
         <div className="asset-table-wrap">
-          <table className="asset-table" ref={tableRef}>
+          <table className="asset-table" ref={tableRef} style={{ width: COLUMNS.reduce((sum, c) => sum + columnWidths[c.key], 0) }}>
+            <colgroup>
+              {COLUMNS.map((c) => <col key={c.key} style={{ width: columnWidths[c.key] }} />)}
+            </colgroup>
             <thead>
               <tr>
                 {COLUMNS.map((c) => (
-                  <th key={c.key} className={c.className} onClick={() => toggleSort(c.key)}>
+                  <th key={c.key} className={c.className} onClick={(e) => { e.stopPropagation(); toggleSort(c.key); }}
+                    aria-sort={sort.key === c.key ? (sort.desc ? "descending" : "ascending") : "none"}>
                     <span>{t(c.label)}</span>
                     {sort.key === c.key && (sort.desc ? <ArrowDown size={12} /> : <ArrowUp size={12} />)}
+                    <ColumnResizer column={c.key} label={t(c.label)} width={columnWidths[c.key]}
+                      onResize={(width, persist) => resizeColumn(c.key, width, persist)} />
                   </th>
                 ))}
               </tr>

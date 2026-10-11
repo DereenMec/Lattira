@@ -1,6 +1,6 @@
 [package]
 name = "lattira"
-version = "0.8.1"
+version = "0.8.2"
 description = "栖页 · Lattira：画布式知识库与文件管理"
 edition = "2021"
 publish = false

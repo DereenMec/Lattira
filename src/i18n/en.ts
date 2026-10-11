@@ -251,6 +251,7 @@ export const en: Record<string, string> = {
     "“{name}” is also used by other cards, so this one now has its own copy. Changes here won't affect the others.",
   // ---- 名字不重复 ----
   "所在位置": "Location",
+  "调整「{name}」列宽": "Resize the {name} column",
   "另 {n} 个位置": "{n} more locations",
   "正在读取路径…": "Loading path…",
   "无法读取路径": "Path unavailable",
